@@ -1,0 +1,40 @@
+# SFT template for an already-pruned checkpoint. This does not prune online.
+model_name_or_path: REPLACE_WITH_PRUNED_QWEN3_5_MOE_CHECKPOINT
+trust_remote_code: true
+model_revision: main
+torch_dtype: bfloat16
+attn_implementation: sdpa
+
+dataset_name: yentinglin/s1K-1.1-trl-format
+dataset_config: null
+dataset_train_split: train
+dataset_num_proc: 8
+
+bf16: true
+do_eval: false
+eval_strategy: "no"
+gradient_accumulation_steps: 1
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+learning_rate: 1.0e-05
+logging_steps: 1
+lr_scheduler_type: cosine_with_min_lr
+lr_scheduler_kwargs:
+  min_lr_rate: 0.1
+max_length: 8192
+num_train_epochs: 2
+output_dir: outputs/sft/pruned/qwen35_moe
+overwrite_output_dir: false
+per_device_train_batch_size: 1
+push_to_hub: false
+report_to: none
+save_strategy: epoch
+seed: 1234
+warmup_ratio: 0.1
+
+router_prune_enable: false
+router_prune_use_plan: false
+layer_entropy_l1_weight: 0.0
+last_entropy_weight: 0.0
+attn_kl_weight: 0.0

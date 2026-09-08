@@ -1,0 +1,8 @@
+accelerate==1.4.0
+deepspeed==0.16.7
+xformers>=0.0.35
+trl @ git+https://github.com/huggingface/trl.git@69ad852e5654a77f1695eb4c608906fe0c7e8624
+einops>=0.8.0
+huggingface-hub[cli]>=0.29
+tokenizers==0.22.2
+wandb>=0.19.1

@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "less-is-moe"
+version = "0.1.0"
+description = "Pruning, model patches, fine-tuning, and evaluation for Less-is-MoE."
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{name = "Less-is-MoE authors"}]
+keywords = ["mixture-of-experts", "pruning", "language-models"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "datasets>=3.2.0",
+  "latex2sympy2_extended>=1.0.6",
+  "math-verify==0.5.2",
+  "numpy>=1.26",
+  "packaging>=23.0",
+  "python-dotenv>=1.0",
+  "PyYAML>=6.0",
+  "safetensors>=0.3.3",
+  "sentencepiece>=0.1.99",
+  "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+judge = ["openai>=1.0,<3"]
+
+[project.entry-points."vllm.general_plugins"]
+less_is_moe = "less_is_moe.model_patches.vllm_plugin:register"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
