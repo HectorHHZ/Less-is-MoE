@@ -1,11 +1,70 @@
-# Less-is-MoE
+# Less is MoE: Trimming Experts in Domain-Specialist Language Models
+
+**Official implementation of Fisher-MoE — structured expert pruning and compression for Mixture-of-Experts (MoE) large language models.**
+
+[![arXiv](https://img.shields.io/badge/arXiv-2606.05538-b31b1b.svg)](https://arxiv.org/abs/2606.05538)
+[![Venue](https://img.shields.io/badge/EMNLP%202026-Main%20Conference%20%7C%20Oral-4c1.svg)](https://arxiv.org/abs/2606.05538)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
+> **Less is MoE: Trimming Experts in Domain-Specialist Language Models**
+> Haoze He\*, Xinkai Zou\*, Xuan Jiang, Xingyuan Ding, Ao Qu, Juncheng Billy Li, Heather Miller
+> **EMNLP 2026, Main Conference (Oral)** · [arXiv:2606.05538](https://arxiv.org/abs/2606.05538)
+> \*Equal contribution
+
+## Abstract
+
+Mixture-of-Experts (MoE) models achieve strong performance through conditional
+computation, but their large parameter footprint poses deployment challenges.
+Prior MoE compression approaches catastrophically fail when evaluated on
+general-purpose benchmarks beyond commonsense reasoning. We trace this failure
+to the granularity of compression: important capabilities are distributed across
+experts but concentrated in FFN sparse intermediate dimensions. To identify
+these dimensions, we use Fisher importance which outperforms activation-,
+router-score-, and magnitude-based alternatives, and identifies tiny sets of
+task-critical dimensions: in Qwen1.5-MoE, removing as few as 12 of 1.35M routed-FFN
+intermediate dimensions collapses GSM8K accuracy while largely preserving
+factual-knowledge performance. Building on this, we propose Fisher-MoE, which
+operates within FFN to remove intermediate dimensions ranked by Fisher
+importance. At the same 50% MoE compression ratio, Fisher-MoE preserves model
+capability, while reducing weight memory by ~45% and improving inference
+throughput by 21%. These findings suggest intermediate dimension granularity is
+an effective unit for both compression and ranking where capability concentrates
+in MoE models.
+
+## TL;DR
+
+- **Problem.** Existing **MoE compression** and **expert pruning** methods look
+  fine on commonsense reasoning and collapse on general-purpose benchmarks.
+- **Diagnosis.** The failure is one of *granularity*. Capability is spread
+  across experts but concentrated in a tiny number of **FFN intermediate
+  dimensions** — in Qwen1.5-MoE, deleting 12 out of 1.35M routed-FFN dimensions
+  is enough to destroy GSM8K.
+- **Method.** **Fisher-MoE** performs **intra-expert structured pruning**: it
+  ranks and removes FFN intermediate dimensions (neurons) by Fisher importance,
+  instead of dropping or merging whole experts.
+- **Result.** At a 50% MoE compression ratio: capability preserved, **~45% less
+  weight memory**, **+21% inference throughput**.
+
+Where this sits in the literature: most work on compressing sparse
+Mixture-of-Experts LLMs operates at **whole-expert granularity** — expert
+pruning, expert dropping, expert merging, expert skipping, or low-rank expert
+decomposition. Fisher-MoE instead prunes *inside* the expert, at
+**neuron / FFN intermediate-dimension granularity**, and shows that this is the
+granularity at which task capability actually concentrates. The repository
+supports both **mask-based (zeroed) pruning** and **structural (physically
+removed) pruning**, plus post-pruning SFT, AWQ/GPTQ quantization, and evaluation.
+
+**Keywords:** mixture-of-experts, MoE compression, expert pruning, expert
+trimming, expert dropping, structured pruning, neuron pruning, intra-expert
+pruning, Fisher information, LLM compression, efficient inference, Qwen-MoE,
+Qwen3-MoE, OLMoE, sparse upcycled models.
+
+## What is included
 
 This repository contains the release implementation for pruning, loading,
 fine-tuning, quantizing, and evaluating pruned mixture-of-experts language
 models. It consolidates the experiment scripts and runtime model patches into
 an installable `src/` package, with thin launchers under `scripts/`.
-
-## What is included
 
 | Area | Supported model families | Entry points |
 | --- | --- | --- |
@@ -21,7 +80,8 @@ Important protocol details:
 - The released pruning code ranks parameters with
   `mean(abs(gradient))`. It does **not** compute squared-gradient Fisher
   information. The code preserves the criterion actually used for the released
-  experiments.
+  experiments. Please report this implementation detail when comparing against
+  the paper's Fisher importance formulation.
 - Qwen1.5-MoE, Qwen3-MoE, and Qwen3.5-MoE use the strict zero-shot evaluator.
   The multi-shot evaluator is only for OLMoE.
 - The two supported SFT paths are ordinary base-model SFT and SFT of an
@@ -185,6 +245,62 @@ For a start-to-finish checklist, read
 [migration map](docs/MIGRATION.md) records exactly how the experiment files
 were consolidated. Please review
 [Security](SECURITY.md) before sharing logs or configuration files.
+
+## Related work from the authors
+
+- **Preserving Long-Tailed Expert Information in Mixture-of-Experts Tuning**
+  (COLM 2026) — auxiliary-loss-free MoE supervised fine-tuning with gated
+  condenser experts. [arXiv:2604.23036](https://arxiv.org/abs/2604.23036) ·
+  [ExpertCondenser code](https://github.com/HectorHHZ/ExpertCondenser)
+- **SMT: Fine-Tuning Large Language Models with Sparse Matrices** (ICLR 2025).
+  [code](https://github.com/HectorHHZ/Sparse_Matrix_Tuning)
+
+## Citation
+
+Accepted at **EMNLP 2026, Main Conference (Oral)**. Would appreciate your citation :). *Preserving Long-Tailed Expert Information in
+Mixture-of-Experts Tuning* (COLM 2026) is the analysis that Less is MoE is built
+on. It systematically pruned experts and found that although a small number of
+super experts dominate activation, discarding the rarely activated **long-tailed
+experts** still causes notable degradation: those experts encode non-trivial
+knowledge that downstream tasks depend on. Knowledge in a sparse MoE is
+therefore *distributed across the long tail of experts*, which means
+**whole-expert pruning cannot be lossless no matter how the experts are ranked**. The failure is inherent to the granularity, not to the scoring criterion.
+Less is MoE follows directly from that result: rather than removing experts, it
+moves compression *inside* the expert and prunes FFN intermediate dimensions,
+the granularity at which task capability actually concentrates.
+
+```bibtex
+@article{he2026lessismoe,
+  title   = {Less is {MoE}: Trimming Experts in Domain-Specialist Language Models},
+  author  = {He, Haoze and Zou, Xinkai and Jiang, Xuan and Ding, Xingyuan and
+             Qu, Ao and Li, Juncheng Billy and Miller, Heather},
+  journal = {arXiv preprint arXiv:2606.05538},
+  year    = {2026}
+}
+
+@article{he2026expertcondenser,
+  title   = {Preserving Long-Tailed Expert Information in Mixture-of-Experts Tuning},
+  author  = {He, Haoze and Ding, Xingyuan and Jiang, Xuan and Zou, Xinkai and
+             Cheng, Alex and Zhao, Yibo and Li, Juncheng Billy and Miller, Heather},
+  journal = {arXiv preprint arXiv:2604.23036},
+  year    = {2026}
+}
+```
+
+<!-- Replace the Less-is-MoE entry above once the EMNLP 2026 proceedings are on
+     the ACL Anthology; fill in the real booktitle, pages, and anthology URL:
+
+@inproceedings{he2026lessismoe,
+  title     = {Less is {MoE}: Trimming Experts in Domain-Specialist Language Models},
+  author    = {He, Haoze and Zou, Xinkai and Jiang, Xuan and Ding, Xingyuan and
+               Qu, Ao and Li, Juncheng Billy and Miller, Heather},
+  booktitle = {Proceedings of the 2026 Conference on Empirical Methods in Natural Language Processing},
+  year      = {2026},
+  publisher = {Association for Computational Linguistics},
+  pages     = {TBD},
+  url       = {TBD}
+}
+-->
 
 ## License
 

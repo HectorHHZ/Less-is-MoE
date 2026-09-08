@@ -1,0 +1,75 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software or the Fisher-MoE method, please cite the
+  EMNLP 2026 paper below.
+title: >-
+  Less is MoE: Trimming Experts in Domain-Specialist Language Models
+abstract: >-
+  Official implementation of Fisher-MoE: intra-expert structured pruning and
+  compression for Mixture-of-Experts (MoE) large language models. Prunes FFN
+  intermediate dimensions ranked by Fisher importance instead of dropping or
+  merging whole experts, preserving general-purpose capability at a 50%
+  compression ratio while reducing weight memory by ~45% and improving
+  inference throughput by 21%.
+type: software
+license: Apache-2.0
+repository-code: https://github.com/HectorHHZ/Less-is-MoE
+url: https://arxiv.org/abs/2606.05538
+keywords:
+  - mixture-of-experts
+  - moe
+  - expert-pruning
+  - model-compression
+  - structured-pruning
+  - large-language-models
+  - efficient-inference
+  - fisher-information
+authors:
+  - given-names: Haoze
+    family-names: He
+  - given-names: Xinkai
+    family-names: Zou
+  - given-names: Xuan
+    family-names: Jiang
+  - given-names: Xingyuan
+    family-names: Ding
+  - given-names: Ao
+    family-names: Qu
+  - given-names: Juncheng Billy
+    family-names: Li
+  - given-names: Heather
+    family-names: Miller
+# Accepted at EMNLP 2026 (Main Conference, Oral). The proceedings are not
+# published yet, so the preferred citation points at the arXiv version, which is
+# the record Google Scholar and Semantic Scholar currently index. Switch this to
+# type: conference-paper with the ACL Anthology collection-title, pages, and URL
+# once the proceedings appear.
+preferred-citation:
+  type: article
+  title: >-
+    Less is MoE: Trimming Experts in Domain-Specialist Language Models
+  journal: arXiv preprint arXiv:2606.05538
+  year: 2026
+  url: https://arxiv.org/abs/2606.05538
+  identifiers:
+    - type: other
+      value: arXiv:2606.05538
+      description: arXiv preprint
+    - type: doi
+      value: 10.48550/arXiv.2606.05538
+      description: arXiv DOI
+  authors:
+    - given-names: Haoze
+      family-names: He
+    - given-names: Xinkai
+      family-names: Zou
+    - given-names: Xuan
+      family-names: Jiang
+    - given-names: Xingyuan
+      family-names: Ding
+    - given-names: Ao
+      family-names: Qu
+    - given-names: Juncheng Billy
+      family-names: Li
+    - given-names: Heather
+      family-names: Miller

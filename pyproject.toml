@@ -5,16 +5,41 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "less-is-moe"
 version = "0.1.0"
-description = "Pruning, model patches, fine-tuning, and evaluation for Less-is-MoE."
+description = "Less is MoE (EMNLP 2026 Oral): Fisher-MoE, intra-expert structured pruning and compression for Mixture-of-Experts (MoE) large language models."
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-authors = [{name = "Less-is-MoE authors"}]
-keywords = ["mixture-of-experts", "pruning", "language-models"]
+authors = [
+  {name = "Haoze He"},
+  {name = "Xinkai Zou"},
+  {name = "Xuan Jiang"},
+  {name = "Xingyuan Ding"},
+  {name = "Ao Qu"},
+  {name = "Juncheng Billy Li"},
+  {name = "Heather Miller"},
+]
+keywords = [
+  "mixture-of-experts",
+  "moe",
+  "expert-pruning",
+  "model-compression",
+  "structured-pruning",
+  "neuron-pruning",
+  "pruning",
+  "large-language-models",
+  "llm",
+  "efficient-inference",
+  "fisher-information",
+  "qwen",
+  "olmoe",
+]
 classifiers = [
   "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
   "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
@@ -29,6 +54,11 @@ dependencies = [
   "sentencepiece>=0.1.99",
   "tqdm>=4.66",
 ]
+
+[project.urls]
+Paper = "https://arxiv.org/abs/2606.05538"
+Repository = "https://github.com/HectorHHZ/Less-is-MoE"
+Issues = "https://github.com/HectorHHZ/Less-is-MoE/issues"
 
 [project.optional-dependencies]
 test = ["pytest>=8.0"]
