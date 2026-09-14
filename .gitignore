@@ -38,3 +38,6 @@ venv/
 .idea/
 .vscode/
 *~
+
+# Local caches
+.cache/
