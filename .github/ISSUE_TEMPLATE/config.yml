@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/HectorHHZ/Less-is-MoE/blob/main/SECURITY.md
+    about: Do not open a public issue with vulnerability details. Follow SECURITY.md.
+  - name: Read the contributing guide
+    url: https://github.com/HectorHHZ/Less-is-MoE/blob/main/CONTRIBUTING.md
+    about: Check the reported protocol and model-family checklist before starting substantial work.

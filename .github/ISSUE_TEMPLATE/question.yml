@@ -1,0 +1,12 @@
+name: Question
+description: A focused usage question the documentation does not answer
+title: "[Question] "
+labels: [question]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: Include what you already tried and which documentation you read.
+    validations:
+      required: true

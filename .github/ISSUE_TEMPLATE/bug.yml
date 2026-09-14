@@ -1,0 +1,41 @@
+name: Bug report
+description: A crash, an unloadable checkpoint, or other incorrect behavior
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Search existing issues first. Remove tokens, private model URLs, and private data from every field.
+  - type: dropdown
+    id: family
+    attributes:
+      label: Model family
+      options: [Qwen1.5-MoE, Qwen3-MoE, Qwen3.5-MoE, OLMoE, Other]
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [Pruning, Runtime patch (Hugging Face), Runtime patch (vLLM), Evaluation, SFT, Quantization, Setup]
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Command and error
+      description: The exact command and the full error or traceback.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      value: |
+        Profile (legacy / qwen3 / qwen35):
+        Commit:
+        Python / PyTorch / Transformers / vLLM:
+        GPU:
+    validations:
+      required: true

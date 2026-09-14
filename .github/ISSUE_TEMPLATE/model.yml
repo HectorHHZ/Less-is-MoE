@@ -1,0 +1,24 @@
+name: Model support
+description: Support for a new MoE family or a new version of a supported one
+title: "[Model] "
+labels: [enhancement]
+body:
+  - type: input
+    id: model
+    attributes:
+      label: Hugging Face model ID
+    validations:
+      required: true
+  - type: textarea
+    id: architecture
+    attributes:
+      label: MoE architecture
+      description: How its MoE block differs from the closest supported family (shared experts, expert tensor layout, config fields).
+    validations:
+      required: true
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contribution
+      options:
+        - label: I plan to implement this following the model-family checklist in CONTRIBUTING.md.

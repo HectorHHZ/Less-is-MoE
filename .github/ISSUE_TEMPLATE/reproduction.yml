@@ -1,0 +1,35 @@
+name: Reproduction report
+description: A result that differs from the paper when following the release protocol
+title: "[Reproduction] "
+body:
+  - type: markdown
+    attributes:
+      value: Follow [docs/REPRODUCIBILITY.md](https://github.com/HectorHHZ/Less-is-MoE/blob/main/docs/REPRODUCIBILITY.md) first. Reports without the run inputs below cannot be investigated.
+  - type: textarea
+    id: result
+    attributes:
+      label: Expected vs. obtained
+      description: Benchmark, the paper's number, and your number.
+    validations:
+      required: true
+  - type: textarea
+    id: inputs
+    attributes:
+      label: Run inputs
+      value: |
+        Base checkpoint and revision:
+        Pruning launcher and drop ratio:
+        Calibration data, sample count, sequence length, seed:
+        dtype:
+        Evaluation protocol (strict zero-shot / OLMoE multi-shot):
+        SFT recipe (if any):
+        Profile and commit:
+    validations:
+      required: true
+  - type: textarea
+    id: commands
+    attributes:
+      label: Commands
+      render: shell
+    validations:
+      required: true
