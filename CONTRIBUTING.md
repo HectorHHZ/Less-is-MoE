@@ -33,8 +33,15 @@ Start the title with exactly one type prefix, then a short outcome:
 | `[Feature]` | A new capability, such as a pruning option or quantization backend |
 | `[Docs]` | Missing, unclear, or incorrect documentation |
 | `[Question]` | A focused usage question the documentation does not answer |
+| `[Task]` | Scoped implementation, refactoring, or project work approved by a maintainer |
+| `[Experiment]` | A benchmark run or results table with pinned models, data, and metrics |
+| `[Roadmap]` | A maintainer-owned issue that tracks a set of related issues |
 
 For example: `[Bug] Structural Qwen3-MoE checkpoint fails to load in vLLM`.
+
+`[Task]`, `[Experiment]`, and `[Roadmap]` issues are opened by maintainers and
+have no issue form. To propose one, open a `[Feature]` issue or comment on the
+relevant roadmap.
 
 Include the information needed to act on the report:
 
