@@ -183,6 +183,28 @@ When an AI tool makes a non-trivial contribution:
 
 AI assistance does not lower the bar for correctness, tests, or documentation.
 
+## Name your branch
+
+Open every change from its own branch, named `<type>/<short-description>`:
+
+| Type | Use it for |
+| --- | --- |
+| `feat/` | A new capability, model family, benchmark, or baseline |
+| `fix/` | A bug fix |
+| `exp/` | Scripts, configs, or result tooling for an `[Experiment]` issue |
+| `perf/` | A speed or memory improvement |
+| `refactor/` | Restructuring that does not change behavior |
+| `test/` | Tests only |
+| `docs/` | Documentation only |
+| `chore/` | CI, packaging, dependencies, and repository maintenance |
+
+- Use lowercase kebab-case, and describe the change rather than the author or
+  tool: `feat/gemma4-support`, not `haoze/wip`.
+- When the branch implements an issue, start the description with the issue
+  number: `feat/14-slimqwen-prune-only`.
+- Use one branch per pull request, and delete it once the pull request is
+  merged.
+
 ## Make a pull request
 
 Before requesting review:
