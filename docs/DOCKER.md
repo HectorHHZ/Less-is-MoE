@@ -43,12 +43,30 @@ initialized models make the tests independent of private weights and datasets.
 | HF structural roundtrip | All six families, including GPT-OSS and Gemma 4; FP32 and BF16 | Unsorted per-expert selections equal zero-masking; save, stock verify, reload and forward; exact saved tensor recovery |
 | Probe failure | GPT-OSS, FP32 and BF16 | A failed discovery probe leaves the live weights unchanged |
 | vLLM generation | Original and half-width checkpoints for seven fixture configurations | Stock upstream model classes generate two valid tokens on GPU |
+| Four new model targets | Qwen3.5 35B/122B widths, GPT-OSS and Gemma 4; FP32 and BF16 | Gradient scoring, 50% selection, exact kept weights, full-model zero-mask equivalence, stock HF save/reload |
+| Gradient-pruned vLLM generation | The four new targets, BF16 | Original and gradient-selected half-width checkpoints both generate with stock vLLM |
 
 The vLLM fixtures cover Qwen2-MoE, Qwen3-MoE, OLMoE, both Qwen3.5 target
 widths (512 -> 256 and 1024 -> 512), GPT-OSS (2880 -> 1440), and Gemma 4
 (704 -> 352). Layers, expert counts and hidden sizes are reduced; these are
 **architecture/width tests, not runs of the full pretrained 120B/122B models**.
 GPT-OSS uses BF16 expert tensors, not native packed MXFP4.
+
+`tests/test_intdim_new_models.py` also exercises those four target widths in
+FP32 and BF16, with the same two-layer, hidden-size-128, four-expert, top-2
+configurations as the vLLM fixtures. It scores two fixed six-token sequences
+with `mean(abs(gradient))` and removes 50% per expert. Both Qwen3.5 widths are
+compared against the unchanged released scoring and structural functions;
+scores, indices, all parameters and logits must match exactly. GPT-OSS and
+Gemma 4 have no legacy functions: their functional oracle is the original model
+with dropped down-projection columns zeroed, not a claimed old/new comparison.
+Masked/structural logits allow FP32 `rtol=1e-5, atol=1e-5` and BF16
+`rtol=0.02, atol=0.002`; kept weights and saved/reloaded weights/logits must
+match bitwise. GPT-OSS includes nonzero expert biases. Tests use text inputs;
+Gemma 4's fixture disables per-layer input embeddings. Setting
+`INTDIM_TEST_VLLM=1` additionally generates from the original and the actual
+gradient-pruned BF16 checkpoints (eight generations). The release gate enables
+this check.
 
 The old Qwen2/Qwen3/OLMoE functions require per-expert Linear modules. Tests
 reconstruct that storage from identical native HF weights and call the actual,
@@ -96,6 +114,11 @@ docker run --rm --gpus 'device=0' --network none -e OMP_NUM_THREADS=2 \
   less-is-moe:dev-unified python -m pytest tests/test_intdim_runtime.py -q
 docker run --rm --gpus 'device=0' --network none --shm-size=2g -e OMP_NUM_THREADS=2 \
   less-is-moe:dev-unified python docker/intdim_vllm_smoke.py --family all
+
+# Four new targets: gradient-driven pruning, HF equivalence, and BF16 vLLM.
+docker run --rm --gpus 'device=0' --network none --shm-size=2g -e OMP_NUM_THREADS=2 \
+  -e INTDIM_TEST_VLLM=1 less-is-moe:dev-unified \
+  python -m pytest tests/test_intdim_new_models.py -q -s
 ```
 
 Expose only the GPU allocated to your job. On a Docker host configured for
