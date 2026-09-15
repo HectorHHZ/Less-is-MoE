@@ -443,8 +443,8 @@ def _eager_experts(experts: nn.Module):
             config._experts_implementation = previous
 
 
-def _run_expert(experts: nn.Module, x: torch.Tensor, num_tokens: int) -> torch.Tensor:
-    index = torch.zeros(num_tokens, 1, dtype=torch.long, device=x.device)
+def _run_expert(experts: nn.Module, x: torch.Tensor, num_tokens: int, expert: int = 0) -> torch.Tensor:
+    index = torch.full((num_tokens, 1), expert, dtype=torch.long, device=x.device)
     weights = torch.ones(num_tokens, 1, dtype=x.dtype, device=x.device)
     try:
         with _eager_experts(experts):
@@ -458,42 +458,68 @@ def _run_expert(experts: nn.Module, x: torch.Tensor, num_tokens: int) -> torch.T
 
 
 @torch.no_grad()
-def _consistent(handle: MoeLayerHandle, layout: FusedLayout, num_tokens: int, seed: int) -> bool:
+def _consistent(handle: MoeLayerHandle, layout: FusedLayout, num_tokens: int, seed: int, max_units: int = 8) -> bool:
+    """Whether zeroing a unit's gate/up rows matches zeroing its down column, under ``layout``.
+
+    Only *live* units are informative: in a zero-masked checkpoint half the
+    units may already be zero, and removing a dead unit changes nothing under
+    any hypothesis. Up to ``max_units`` units whose hypothesised gate row is
+    non-zero are tested; every informative unit must agree, and at least one
+    must be informative.
+    """
     experts = handle.experts
-    gate_up, down = handle.gate_up, handle.down
+    gate_up, down, bias = handle.gate_up, handle.down, handle.gate_up_bias
     dtype, device = gate_up.dtype, gate_up.device
     gen = torch.Generator(device="cpu").manual_seed(seed)
     x = torch.randn(num_tokens, handle.hidden_size, generator=gen).to(device=device, dtype=dtype)
     tol = 1e-4 if dtype == torch.float32 else 3e-2
-    unit = torch.tensor([handle.intermediate_size // 2])
-    if layout.pairing == "concat":
-        rows = torch.cat([unit, unit + handle.intermediate_size])
-    else:
-        rows = torch.cat([2 * unit, 2 * unit + 1])
+    inter = handle.intermediate_size
 
-    baseline = _run_expert(experts, x, num_tokens).clone()
+    def rows_of(unit: torch.Tensor) -> torch.Tensor:
+        if layout.pairing == "concat":
+            return torch.cat([unit, unit + inter])
+        return torch.cat([2 * unit, 2 * unit + 1])
 
-    # A unit is removed by zeroing its gate and up rows *and* their biases:
-    # with a bias left in place the gate stays non-zero and the unit survives.
-    bias = handle.gate_up_bias
-    saved = gate_up[0].clone()
-    saved_bias = bias[0].clone() if bias is not None else None
-    gate_up[0].index_fill_(layout.gate_up_unit_axis - 1, rows.to(device), 0)
-    if bias is not None:
-        bias[0].index_fill_(0, rows.to(bias.device), 0)
-    zero_gate_up = _run_expert(experts, x, num_tokens).clone()
-    gate_up[0].copy_(saved)
-    if bias is not None:
-        bias[0].copy_(saved_bias)
+    # Probe the expert with the most live units under this hypothesis: a zero-mask
+    # with the layer or global scope can remove every unit of some experts.
+    gu = gate_up if layout.gate_up_unit_axis == 1 else gate_up.transpose(1, 2)  # (E, 2I, H)
+    gates = gu[:, :inter] if layout.pairing == "concat" else gu[:, 0::2]
+    live_mask = gates.float().abs().sum(dim=2) > 0  # (E, I)
+    expert = int(live_mask.sum(dim=1).argmax())
+    live = torch.nonzero(live_mask[expert], as_tuple=False).flatten().cpu()
+    if live.numel() == 0:
+        return False
+    picks = live[torch.linspace(0, live.numel() - 1, min(max_units, live.numel())).round().long().unique()]
 
-    saved = down[0].clone()
-    down[0].index_fill_(layout.down_unit_axis - 1, unit.to(device), 0)
-    zero_down = _run_expert(experts, x, num_tokens).clone()
-    down[0].copy_(saved)
+    baseline = _run_expert(experts, x, num_tokens, expert).clone()
+    informative = 0
+    for unit in picks.tolist():
+        u = torch.tensor([unit])
+        rows = rows_of(u).to(device)
 
-    changed = not torch.allclose(zero_down, baseline, atol=tol, rtol=tol)
-    same = torch.allclose(zero_gate_up, zero_down, atol=tol, rtol=tol)
-    return changed and same
+        saved = gate_up[expert].clone()
+        saved_bias = bias[expert].clone() if bias is not None else None
+        gate_up[expert].index_fill_(layout.gate_up_unit_axis - 1, rows, 0)
+        if bias is not None:
+            bias[expert].index_fill_(0, rows.to(bias.device), 0)
+        zero_gate_up = _run_expert(experts, x, num_tokens, expert).clone()
+        gate_up[expert].copy_(saved)
+        if bias is not None:
+            bias[expert].copy_(saved_bias)
+
+        saved = down[expert].clone()
+        down[expert].index_fill_(layout.down_unit_axis - 1, u.to(device), 0)
+        zero_down = _run_expert(experts, x, num_tokens, expert).clone()
+        down[expert].copy_(saved)
+
+        down_changed = not torch.allclose(zero_down, baseline, atol=tol, rtol=tol)
+        gate_up_changed = not torch.allclose(zero_gate_up, baseline, atol=tol, rtol=tol)
+        if not (down_changed or gate_up_changed):
+            continue
+        informative += 1
+        if not torch.allclose(zero_gate_up, zero_down, atol=tol, rtol=tol):
+            return False
+    return informative > 0
 
 
 def probe_fused_layout(
