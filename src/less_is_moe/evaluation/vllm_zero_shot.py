@@ -550,7 +550,8 @@ def main(args):
             "and Qwen3.5-MoE. Use vllm_olmoe_multishot for OLMoE; detected "
             f"{family!r}."
         )
-    if not args.base_model:
+    os.environ["LESS_IS_MOE_RUNTIME_PATCH"] = args.runtime_patch
+    if not args.base_model and args.runtime_patch == "legacy":
         if not apply_vllm_patch(family):
             raise RuntimeError(
                 f"The installed vLLM does not provide the {family} model module "
@@ -558,7 +559,7 @@ def main(args):
             )
         print(f"[Patch] enabled Less-is-MoE vLLM patch for {family}.")
     else:
-        print("[Patch] base_model=True，跳过本地 MoE patch，直接使用模型自带实现。")
+        print("[Patch] using stock vLLM model implementation.")
 
     dataset_lower = args.dataset.lower()
 
@@ -1161,6 +1162,11 @@ if __name__ == "__main__":
     )
     parser.add_argument("--openai_api_key", type=str, default=None)
 
+    parser.add_argument(
+        "--runtime_patch", choices=("stock", "legacy"),
+        default=os.environ.get("LESS_IS_MOE_RUNTIME_PATCH", "legacy"),
+        help="Use stock models for uniform-width IntDim-E; legacy patches preserve older expert-drop workflows.",
+    )
     args = parser.parse_args()
 
     if args.dtype == "fp16":

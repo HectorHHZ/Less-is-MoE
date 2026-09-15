@@ -1,0 +1,11 @@
+# The unified Docker environment is independent of the reproduction profiles.
+# Regenerate requirements.txt with ./environments/unified/lock.sh (uv 0.12.5).
+torch==2.13.0+cu130
+transformers==5.17.0
+vllm==0.29.0
+tokenizers==0.23.1
+accelerate==1.13.0
+# Include installer/build tools in the lock, including the local package build.
+pip
+setuptools
+wheel

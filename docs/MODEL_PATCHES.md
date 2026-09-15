@@ -1,8 +1,19 @@
 # Runtime model patches
 
-Structurally pruned MoE checkpoints contain layer-wise expert dimensions that
-the stock Hugging Face and vLLM implementations do not understand. The modules
-under `src/less_is_moe/model_patches/` provide those compatibility changes.
+Uniform-width **IntDim-E** checkpoints use stock Hugging Face and vLLM models
+in the [unified Docker environment](DOCKER.md). The GPU tests compare the new
+path against the released per-family algorithm and verify checkpoint roundtrips.
+Do not apply a legacy replacement to these checkpoints.
+
+The unified image sets `LESS_IS_MOE_RUNTIME_PATCH=stock` and `VLLM_PLUGINS=""`.
+Evaluation entry points honor the former; outside Docker, pass
+`--runtime_patch stock`. The plugin also becomes a no-op in stock mode even
+if explicitly selected by vLLM. The legacy files remain for expert-drop,
+router-mask baselines and the original reproduction profiles, whose default
+behavior is preserved. Full model/benchmark accuracy is separate from the tiny
+GPU regression tests documented in `docs/DOCKER.md`.
+
+The API below is for those **legacy workflows**.
 
 ## Hugging Face
 

@@ -125,6 +125,27 @@ upgrade in them.
 See [the environment matrix](docs/ENVIRONMENTS.md) for exact core versions and
 build notes.
 
+### Unified Docker runtime
+
+The root Dockerfile provides one pinned Linux/amd64 environment: Python 3.12.14,
+CUDA 13.0.3, PyTorch 2.13.0+cu130, Transformers 5.17.0, vLLM 0.29.0, and
+Tokenizers 0.23.1. Build and check it with:
+
+```bash
+docker build --platform linux/amd64 -t less-is-moe:dev-unified .
+docker run --rm --gpus all less-is-moe:dev-unified python docker/smoke_test.py --gpu
+```
+
+The image runs generic IntDim-E on stock model implementations and disables
+legacy runtime replacements. GPU validation covers Qwen2-MoE, Qwen3-MoE,
+OLMoE, Qwen3.5-MoE, GPT-OSS and Gemma 4 using tiny random models, including
+legacy-algorithm equivalence and HF/vLLM loading after structural pruning.
+These checks do not certify full-size pretrained model accuracy or native
+MXFP4 pruning. The original `setup.sh` profiles remain available for historical
+reproduction, SFT and expert-drop baselines.
+See [Docker usage and GPU validation](docs/DOCKER.md) for exact scope, commands,
+locks, mounts, and the planned `0.1.0-unified` GHCR release.
+
 ## Pruning
 
 Every shell launcher forwards its arguments to a package module. The following
