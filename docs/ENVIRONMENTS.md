@@ -1,5 +1,8 @@
 # Environment profiles
 
+For the new fixed-version Docker environment, see [Unified Docker runtime](DOCKER.md).
+The profiles below preserve the original experiments while model adapters migrate.
+
 The three profiles are separate because their Transformers, vLLM, PyTorch, and
 CUDA expectations are not interchangeable.
 

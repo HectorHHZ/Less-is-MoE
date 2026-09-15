@@ -853,7 +853,8 @@ def main(args):
             "Use vllm_zero_shot for Qwen MoE models; detected "
             f"{family!r}."
         )
-    if not args.base_model:
+    os.environ["LESS_IS_MOE_RUNTIME_PATCH"] = args.runtime_patch
+    if not args.base_model and args.runtime_patch == "legacy":
         if not apply_vllm_patch(family):
             raise RuntimeError(
                 "The installed vLLM does not provide the OLMoE model module "
@@ -861,7 +862,7 @@ def main(args):
             )
         print(f"[Patch] enabled Less-is-MoE vLLM patch for {family}.")
     else:
-        print("[Patch] base_model=True，跳过本地 MoE patch，直接使用模型自带实现。")
+        print("[Patch] using stock vLLM model implementation.")
 
     dataset_lower = args.dataset.lower()
 
@@ -1619,6 +1620,11 @@ if __name__ == "__main__":
         help="OpenAI API key for ESFT GPT-4 based evaluators. Falls back to env OPENAI_API_KEY (loaded via .env).",
     )
 
+    parser.add_argument(
+        "--runtime_patch", choices=("stock", "legacy"),
+        default=os.environ.get("LESS_IS_MOE_RUNTIME_PATCH", "legacy"),
+        help="Use stock models for uniform-width IntDim-E; legacy patches preserve older expert-drop workflows.",
+    )
     args = parser.parse_args()
 
     # Normalize dtype aliases

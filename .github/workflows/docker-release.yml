@@ -1,0 +1,163 @@
+name: Unified Docker runtime
+
+on:
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'docker/**'
+      - 'environments/unified/**'
+      - 'tests/**'
+      - 'src/less_is_moe/intdim/**'
+      - 'src/less_is_moe/model_patches/vllm_plugin.py'
+      - 'src/less_is_moe/evaluation/**'
+      - 'pyproject.toml'
+      - '.github/workflows/docker-release.yml'
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unified-docker-${{ github.event_name == 'pull_request' && github.ref || 'release' }}
+  cancel-in-progress: false
+
+jobs:
+  syntax:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Check Python and shell syntax
+        run: |
+          python3 -m compileall -q src/less_is_moe docker tests
+          bash -n environments/unified/lock.sh
+          git diff --check
+
+  prepare:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      image: ${{ steps.release.outputs.image }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Validate release and runner configuration
+        id: release
+        env:
+          BUILD_RUNNER: ${{ vars.DOCKER_RUNNER }}
+        run: |
+          if [ -z "$BUILD_RUNNER" ]; then
+            echo '::error::Set DOCKER_RUNNER to a Linux x64 NVIDIA GPU Docker runner with at least 60 GiB free. See docs/DOCKER.md.'
+            exit 1
+          fi
+          python3 - <<'PY'
+          import os, re, tomllib
+          from pathlib import Path
+          version = "dev"
+          if os.environ["GITHUB_EVENT_NAME"] == "push":
+              tag = os.environ["GITHUB_REF_NAME"]
+              if not re.fullmatch(r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", tag):
+                  raise SystemExit("Releases require a stable vMAJOR.MINOR.PATCH tag")
+              version = tag[1:]
+              if tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"] != version:
+                  raise SystemExit("Release tag and pyproject.toml version must match")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"version={version}\n")
+              output.write(f"image=ghcr.io/{os.environ['GITHUB_REPOSITORY'].lower()}\n")
+          PY
+
+  build:
+    needs: [syntax, prepare]
+    runs-on: ${{ vars.DOCKER_RUNNER || 'ubuntu-24.04' }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ${{ needs.prepare.outputs.image }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      GPU_DEVICE: ${{ vars.DOCKER_GPU_DEVICE || '0' }}
+      GPU_ACCESS: ${{ vars.DOCKER_GPU_ACCESS || 'gpus' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Check build capacity
+        run: |
+          test "$(uname -sm)" = 'Linux x86_64'
+          docker_root=$(docker info --format '{{.DockerRootDir}}')
+          for path in "$GITHUB_WORKSPACE" "$docker_root"; do
+            free_kib=$(df -Pk "$path" | awk 'END {print $4}')
+            if [ "$free_kib" -lt 62914560 ]; then
+              echo "::error::Need at least 60 GiB free at $path before building."
+              exit 1
+            fi
+          done
+          df -h "$GITHUB_WORKSPACE" "$docker_root"
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Refuse to overwrite a published version
+        if: github.event_name == 'push'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 docker/check_release_tag.py
+      - name: Build, test, measure, and publish
+        run: |
+          local_image="less-is-moe-ci:$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-unified"
+          trap 'docker image rm "$local_image" >/dev/null 2>&1 || true' EXIT
+          docker build --platform linux/amd64 --progress plain \
+            --build-arg "VERSION=$VERSION" --build-arg "REVISION=$GITHUB_SHA" \
+            --tag "$local_image" .
+          case "$GPU_DEVICE" in ''|*[!0-9]*) echo 'GPU_DEVICE must be a GPU index'; exit 1 ;; esac
+          case "$GPU_ACCESS" in
+            gpus) gpu_args=(--gpus "device=$GPU_DEVICE") ;;
+            cdi) gpu_args=(--device "nvidia.com/gpu=$GPU_DEVICE") ;;
+            *) echo 'GPU_ACCESS must be gpus or cdi'; exit 1 ;;
+          esac
+          docker run --rm "${gpu_args[@]}" --network none \
+            "$local_image" python docker/smoke_test.py --gpu
+          docker run --rm "${gpu_args[@]}" --network none -e OMP_NUM_THREADS=2 \
+            "$local_image" python -m pytest tests/test_intdim_runtime.py tests/test_intdim_equivalence.py -q
+          docker run --rm "${gpu_args[@]}" --network none --shm-size=2g -e OMP_NUM_THREADS=2 \
+            "$local_image" python docker/intdim_vllm_smoke.py --family all
+          docker run --rm "${gpu_args[@]}" --network none --shm-size=2g -e OMP_NUM_THREADS=2 \
+            -e INTDIM_TEST_VLLM=1 \
+            "$local_image" python -m pytest tests/test_intdim_new_models.py -q -s
+          {
+            echo '### Unified environment'
+            echo '```text'
+            docker image inspect "$local_image" --format 'Image ID: {{.Id}}; bytes: {{.Size}}'
+            docker system df
+            df -h "$GITHUB_WORKSPACE" "$(docker info --format '{{.DockerRootDir}}')"
+            echo '```'
+            echo '<details><summary>Installed packages</summary>'
+            echo
+            echo '```text'
+            docker run --rm --entrypoint cat "$local_image" /opt/less-is-moe-environment.txt
+            echo '```'
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            docker tag "$local_image" "$IMAGE:$VERSION-unified"
+            docker push "$IMAGE:$VERSION-unified"
+            docker image inspect "$IMAGE:$VERSION-unified" --format '{{json .RepoDigests}}' >> "$GITHUB_STEP_SUMMARY"
+            docker tag "$local_image" "$IMAGE:latest-unified"
+            docker push "$IMAGE:latest-unified"
+            docker image rm "$IMAGE:$VERSION-unified" "$IMAGE:latest-unified"
+          fi
+      - name: Record disk after a failure
+        if: failure()
+        run: |
+          df -h
+          docker system df || true
