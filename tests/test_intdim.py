@@ -153,6 +153,31 @@ def test_probe_resolves_layout_without_registry(monkeypatch):
     assert h.fused.pairing == "interleaved" and h.fused.down_unit_axis == 1
 
 
+@pytest.mark.parametrize("fam", FUSED_ONLY)
+def test_probe_survives_dead_experts_and_units(fam):
+    """Zero masks remove units, and with the layer or global scope whole experts.
+
+    Expert 0 is fully zeroed and every other expert loses its even units; the
+    probe must still find live units and resolve the same layout.
+    """
+    model, config, _ = _build(fam)
+    h = discover(model, config)[0]  # probed, so the layout used for zeroing is the real one
+    expected = h.fused
+    with torch.no_grad():
+        h.gate_up[0].zero_()
+        h.down[0].zero_()
+        if h.gate_up_bias is not None:
+            h.gate_up_bias[0].zero_()
+        dead = torch.arange(0, h.intermediate_size, 2)
+        for e in range(1, h.num_experts):
+            rows = h.gate_up_indices(dead)
+            h.gate_up[e].index_fill_(expected.gate_up_unit_axis - 1, rows, 0)
+            if h.gate_up_bias is not None:
+                h.gate_up_bias[e].index_fill_(0, rows, 0)
+            h.down[e].index_fill_(expected.down_unit_axis - 1, dead, 0)
+    assert discover(model, config)[0].fused == expected
+
+
 def test_probe_reports_ambiguity_instead_of_guessing():
     model, config, _ = _build("gemma4")
     h = discover(model, config, probe=False)[0]
