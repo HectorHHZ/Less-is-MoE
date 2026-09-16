@@ -62,6 +62,8 @@ def collect_neuron_gradient_scores(model: nn.Module, handles: list[MoeLayerHandl
 
     Returns ``{layer: {expert: Tensor(I)}}`` in float32 on the CPU.
     """
+    if not calib_batches:
+        raise ValueError("Calibration batches must not be empty")
     device = next(model.parameters()).device
     for param in model.parameters():
         param.requires_grad_(False)
@@ -77,28 +79,32 @@ def collect_neuron_gradient_scores(model: nn.Module, handles: list[MoeLayerHandl
                     linear.weight.requires_grad_(True)
         scores[_layer_key(h)] = {e: torch.zeros(h.intermediate_size, dtype=torch.float32) for e in range(h.num_experts)}
 
-    model.train()
-    for batch in tqdm(calib_batches, desc="Collecting neuron gradient scores"):
-        input_ids = batch.to(device)
-        outputs = model(input_ids, labels=input_ids)
-        outputs.loss.backward()
-        for h in handles:
-            layer = scores[_layer_key(h)]
-            if h.kind == "fused":
-                _accumulate_fused(h, layer)
-            else:
-                _accumulate_modulelist(h, layer)
+    model.zero_grad(set_to_none=True)
+    try:
+        model.train()
+        for batch in tqdm(calib_batches, desc="Collecting neuron gradient scores"):
+            input_ids = batch.to(device)
+            outputs = model(input_ids, labels=input_ids)
+            outputs.loss.backward()
+            for h in handles:
+                layer = scores[_layer_key(h)]
+                if h.kind == "fused":
+                    _accumulate_fused(h, layer)
+                else:
+                    _accumulate_modulelist(h, layer)
+            model.zero_grad(set_to_none=True)
+
+        n = len(calib_batches)
+        for layer in scores.values():
+            for e in layer:
+                layer[e] /= n
+
+        return scores
+    finally:
         model.zero_grad(set_to_none=True)
-
-    n = max(len(calib_batches), 1)
-    for layer in scores.values():
-        for e in layer:
-            layer[e] /= n
-
-    model.eval()
-    for param in model.parameters():
-        param.requires_grad_(False)
-    return scores
+        model.eval()
+        for param in model.parameters():
+            param.requires_grad_(False)
 
 
 def _accumulate_fused(h: MoeLayerHandle, layer: dict[int, torch.Tensor]) -> None:
@@ -416,6 +422,10 @@ def validate_args(args: argparse.Namespace) -> None:
 
 def prune(model: nn.Module, args: argparse.Namespace, calib_batches: Iterable[torch.Tensor] | None) -> dict[str, Any]:
     """Run the full pipeline on a loaded model and return the summary (weights are modified in place)."""
+    validate_args(args)
+    batches = None if args.from_zeroed_model else list(calib_batches or [])
+    if batches is not None and not batches:
+        raise ValueError("Calibration batches must not be empty")
     handles = discover(model)
     print(describe(handles))
     d_ffn = handles[0].intermediate_size
@@ -436,7 +446,6 @@ def prune(model: nn.Module, args: argparse.Namespace, calib_batches: Iterable[to
         n_drop = next(iter(counts))
         args.drop_ratio = n_drop / d_ffn
     else:
-        batches = list(calib_batches or [])
         scores = collect_neuron_gradient_scores(model, handles, batches)
         drop_per_layer = pick_neurons_to_drop(scores, args.drop_ratio, args.prune_mode)
         n_drop = int(d_ffn * args.drop_ratio)

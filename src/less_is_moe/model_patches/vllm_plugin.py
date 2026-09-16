@@ -206,5 +206,7 @@ def _register_qwen3_5_moe_causal_lm_config() -> None:
 
 def register() -> None:
     """Entry point invoked by vllm.plugins.load_general_plugins()."""
+    if os.environ.get("LESS_IS_MOE_RUNTIME_PATCH") == "stock":
+        return
     if _patch_vllm_qwen3_5_moe():
         _register_qwen3_5_moe_causal_lm_config()
