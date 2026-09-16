@@ -28,9 +28,10 @@ unpaired rows.
 
 from __future__ import annotations
 
+import copy
 import re
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Iterable, Literal
 
 import torch
@@ -176,11 +177,21 @@ class MoeLayerHandle:
         return gate, up, down
 
     def _per_expert(self, keep: torch.Tensor) -> torch.Tensor:
-        keep = torch.as_tensor(keep, dtype=torch.long)
+        keep = torch.as_tensor(keep)
+        if keep.dtype == torch.bool or keep.is_floating_point() or keep.is_complex():
+            raise ValueError("keep must contain integer unit indices")
+        keep = keep.to(dtype=torch.long)
         if keep.ndim == 1:
             keep = keep.unsqueeze(0).expand(self.num_experts, -1)
-        if keep.shape[0] != self.num_experts:
+        if keep.ndim != 2 or keep.shape[0] != self.num_experts:
             raise ValueError(f"keep must be 1D or (E={self.num_experts}, K), got {tuple(keep.shape)}")
+        if keep.shape[1] == 0 or torch.any(keep < 0) or torch.any(keep >= self.intermediate_size):
+            raise ValueError("keep must contain at least one in-range unit per expert")
+        # A neuron selection is a set. All three projections must use the same
+        # order; gate_up_indices already sorts the paired gate/up rows.
+        keep = keep.sort(dim=-1).values
+        if torch.any(keep[:, 1:] == keep[:, :-1]):
+            raise ValueError("keep must not contain duplicate units")
         return keep
 
     def select_units(self, keep: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -190,7 +201,7 @@ class MoeLayerHandle:
         ``keep`` applies the same units to every expert. Every expert keeps
         the same *count* ``K``, which is what ``IntDim-E`` needs for a
         structural (uniform-width) checkpoint; the units themselves differ per
-        expert. Returned tensors are detached copies keyed by parameter name
+        expert. Indices are normalized to ascending order. Returned tensors are detached copies keyed by parameter name
         (fused) or ``"{expert}.{gate|up|down}"`` (modulelist).
         """
         keep = self._per_expert(keep)
@@ -467,12 +478,7 @@ def _consistent(handle: MoeLayerHandle, layout: FusedLayout, num_tokens: int, se
     non-zero are tested; every informative unit must agree, and at least one
     must be informative.
     """
-    experts = handle.experts
-    gate_up, down, bias = handle.gate_up, handle.down, handle.gate_up_bias
-    dtype, device = gate_up.dtype, gate_up.device
-    gen = torch.Generator(device="cpu").manual_seed(seed)
-    x = torch.randn(num_tokens, handle.hidden_size, generator=gen).to(device=device, dtype=dtype)
-    tol = 1e-4 if dtype == torch.float32 else 3e-2
+    gate_up = handle.gate_up
     inter = handle.intermediate_size
 
     def rows_of(unit: torch.Tensor) -> torch.Tensor:
@@ -484,13 +490,34 @@ def _consistent(handle: MoeLayerHandle, layout: FusedLayout, num_tokens: int, se
     # with the layer or global scope can remove every unit of some experts.
     gu = gate_up if layout.gate_up_unit_axis == 1 else gate_up.transpose(1, 2)  # (E, 2I, H)
     gates = gu[:, :inter] if layout.pairing == "concat" else gu[:, 0::2]
-    live_mask = gates.float().abs().sum(dim=2) > 0  # (E, I)
-    expert = int(live_mask.sum(dim=1).argmax())
-    live = torch.nonzero(live_mask[expert], as_tuple=False).flatten().cpu()
+    # Bound temporary memory to one expert, including for large E/H/I.
+    live_counts = torch.stack([gate.ne(0).any(dim=1).sum() for gate in gates])
+    expert = int(live_counts.argmax())
+    live = torch.nonzero(gates[expert].ne(0).any(dim=1), as_tuple=False).flatten().cpu()
     if live.numel() == 0:
         return False
     picks = live[torch.linspace(0, live.numel() - 1, min(max_units, live.numel())).round().long().unique()]
 
+    # Keep #27's GPU precision and exception safety, combined with #26's
+    # live-unit selection. Only the chosen expert is copied, in FP32 on GPU.
+    memo = {}
+    for parameter in handle.experts.parameters():
+        value = parameter.detach()
+        if value.ndim >= 2 and value.shape[0] == handle.num_experts:
+            value = value[expert:expert + 1]
+        memo[id(parameter)] = nn.Parameter(value.to(dtype=torch.float32).clone(), requires_grad=False)
+    probe = copy.deepcopy(handle.experts, memo)
+    for attr in EXPERT_COUNT_KEYS:
+        if getattr(probe, attr, None) == handle.num_experts:
+            setattr(probe, attr, 1)
+    handle = replace(handle, experts=probe, num_experts=1)
+    experts = handle.experts
+    gate_up, down, bias = handle.gate_up, handle.down, handle.gate_up_bias
+    expert = 0
+    device = gate_up.device
+    gen = torch.Generator(device="cpu").manual_seed(seed)
+    x = torch.randn(num_tokens, handle.hidden_size, generator=gen).to(device=device)
+    tol = 1e-6
     baseline = _run_expert(experts, x, num_tokens, expert).clone()
     informative = 0
     for unit in picks.tolist():
@@ -512,12 +539,12 @@ def _consistent(handle: MoeLayerHandle, layout: FusedLayout, num_tokens: int, se
         zero_down = _run_expert(experts, x, num_tokens, expert).clone()
         down[expert].copy_(saved)
 
-        down_changed = not torch.allclose(zero_down, baseline, atol=tol, rtol=tol)
-        gate_up_changed = not torch.allclose(zero_gate_up, baseline, atol=tol, rtol=tol)
+        down_changed = bool((zero_down - baseline).abs().max() > tol)
+        gate_up_changed = bool((zero_gate_up - baseline).abs().max() > tol)
         if not (down_changed or gate_up_changed):
             continue
         informative += 1
-        if not torch.allclose(zero_gate_up, zero_down, atol=tol, rtol=tol):
+        if not torch.allclose(zero_gate_up, zero_down, atol=tol, rtol=1e-4):
             return False
     return informative > 0
 
@@ -541,8 +568,12 @@ def probe_fused_layout(
     if preferred_pairing in pairings:
         pairings.remove(preferred_pairing)
         pairings.insert(0, preferred_pairing)
-    gate_up_axes = [known_gate_up_axis] if known_gate_up_axis is not None else [1, 2]
-    down_axes = [known_down_axis] if known_down_axis is not None else [1, 2]
+    gate_up_axes = [known_gate_up_axis] if known_gate_up_axis is not None else [
+        axis for axis in (1, 2) if handle.gate_up.shape[axis] == 2 * handle.intermediate_size
+    ]
+    down_axes = [known_down_axis] if known_down_axis is not None else [
+        axis for axis in (1, 2) if handle.down.shape[axis] == handle.intermediate_size
+    ]
     hypotheses = [FusedLayout(g, d, p) for p in pairings for g in gate_up_axes for d in down_axes]
     passed = [layout for layout in hypotheses if _consistent(handle, layout, num_tokens, seed)]
     if len(passed) == 1:
