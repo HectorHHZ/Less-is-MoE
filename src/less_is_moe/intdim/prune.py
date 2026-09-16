@@ -13,8 +13,8 @@ The importance criterion, selection scopes, and outputs are unchanged:
 * **Select.** ``expert`` (IntDim-E) drops the same number of lowest-scoring units
   in every expert; ``layer`` (IntDim-L) pools units across the experts of a layer;
   ``global`` (IntDim-G) pools units across all layers.
-* **Apply.** ``mask`` zeroes the selected units and keeps tensor shapes;
-  ``structural`` removes them, which requires the ``expert`` scope.
+* **Apply.** ``mask`` keeps tensor shapes; ``structural`` removes equal counts
+  with stock loaders; ``ragged`` exports unequal Qwen3-MoE widths for our plugin.
 
 The arithmetic follows the per-family scripts operation for operation, including
 where each reduction runs, so scores and outputs match them exactly.
@@ -386,8 +386,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model_name_or_path", required=True)
     parser.add_argument("--output_dir", required=True)
-    parser.add_argument("--mode", choices=("mask", "structural"), required=True,
-                        help="mask: zero units and keep shapes (neuron_drop_*); structural: remove units (neuron_structure_drop_*)")
+    parser.add_argument("--mode", choices=("mask", "structural", "ragged"), required=True,
+                        help="mask: zero units; structural: uniform stock-loader checkpoint; ragged: compact Qwen3-MoE plugin checkpoint")
     parser.add_argument("--prune_mode", choices=PRUNE_MODES, default="expert",
                         help="Selection scope: expert (IntDim-E), layer (IntDim-L), global (IntDim-G). Structural mode requires expert.")
     parser.add_argument("--drop_ratio", type=float, default=None, help="Fraction of units to drop, in (0, 1)")
@@ -423,6 +423,19 @@ def validate_args(args: argparse.Namespace) -> None:
 def prune(model: nn.Module, args: argparse.Namespace, calib_batches: Iterable[torch.Tensor] | None) -> dict[str, Any]:
     """Run the full pipeline on a loaded model and return the summary (weights are modified in place)."""
     validate_args(args)
+    if args.mode == "ragged":
+        from .ragged import LAYOUT, validate_metadata
+        import copy
+        # Fail before expensive calibration for unsupported model families.
+        config = copy.deepcopy(model.config)
+        if config.model_type != "qwen3_moe":
+            raise ValueError("Ragged v1 supports Qwen3-MoE only")
+        config.less_is_moe = dict(format_version=1, weight_layout=LAYOUT,
+                                 expert_intermediate_sizes={str(i): [config.moe_intermediate_size] * config.num_experts
+                                                            for i in range(config.num_hidden_layers)})
+        validate_metadata(config)
+        if any(p.device.type != "cuda" for p in model.parameters()):
+            raise ValueError("Ragged pruning requires the entire model on GPU")
     batches = None if args.from_zeroed_model else list(calib_batches or [])
     if batches is not None and not batches:
         raise ValueError("Calibration batches must not be empty")
@@ -467,6 +480,13 @@ def prune(model: nn.Module, args: argparse.Namespace, calib_batches: Iterable[to
             "per_layer": per_layer,
         }
 
+    if args.mode == "ragged":
+        from .ragged import compact_model
+        summary = compact_model(model, handles, drop_per_layer)
+        return {**summary, **common, "method": "ragged_neuron_structure_drop",
+                "prune_mode": args.prune_mode, "drop_ratio": args.drop_ratio,
+                "source_model": args.model_name_or_path, "drop_plan": drop_per_layer}
+
     per_layer, total_dropped, total_neurons, new_d_ffn = structurally_remove_neurons(handles, drop_per_layer)
     handles[0].intermediate_size_key.set(model.config, new_d_ffn)
     return {
@@ -504,8 +524,12 @@ def main(argv: list[str] | None = None) -> int:
     summary = prune(model, args, batches)
 
     os.makedirs(args.output_dir, exist_ok=True)
-    model.save_pretrained(args.output_dir)
-    tokenizer.save_pretrained(args.output_dir)
+    if args.mode == "ragged":
+        from .ragged import save_checkpoint
+        save_checkpoint(model, args.output_dir, tokenizer)
+    else:
+        model.save_pretrained(args.output_dir)
+        tokenizer.save_pretrained(args.output_dir)
 
     if args.mode == "structural" and not args.skip_verify:
         from .verify import verify_checkpoint
