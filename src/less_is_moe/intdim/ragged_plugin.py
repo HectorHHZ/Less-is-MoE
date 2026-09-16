@@ -3,7 +3,7 @@
 
 def register():
     from vllm import ModelRegistry
-    ModelRegistry.register_model(
-        "RaggedQwen3MoeForCausalLM",
-        "less_is_moe.intdim.ragged_vllm:RaggedQwen3MoeForCausalLM",
-    )
+    from .ragged import ARCHITECTURES
+    for architecture in ARCHITECTURES.values():
+        ModelRegistry.register_model(
+            architecture, f"less_is_moe.intdim.ragged_vllm:{architecture}")

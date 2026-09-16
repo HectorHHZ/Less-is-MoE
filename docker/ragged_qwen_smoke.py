@@ -2,7 +2,8 @@
 
 Run prepare and generate in separate processes so HF does not retain GPU memory
 while vLLM starts. --model tiny is explicitly a random architecture fixture.
-Any other --model is a complete local pretrained Qwen3-MoE checkpoint.
+Any other --model is a complete local pretrained language-model checkpoint.
+Qwen3.5 uses every language layer; its vision tower is outside this text test.
 """
 
 import argparse
@@ -29,6 +30,7 @@ def prepare(args):
     from less_is_moe.intdim import discover
     from less_is_moe.intdim import prune as P
     from less_is_moe.intdim.ragged import compact_model, load_checkpoint, save_checkpoint
+    from less_is_moe.intdim.ragged_hf import load_source_model
 
     if not torch.cuda.is_available():
         raise RuntimeError("GPU required; CPU/offload is not supported")
@@ -37,7 +39,7 @@ def prepare(args):
     started = time.time()
     if args.model == "tiny":
         from docker.intdim_vllm_smoke import make_config
-        config = make_config("qwen3_moe")
+        config = make_config(args.family).get_text_config()
         config._experts_implementation = "eager"
         model = AutoModelForCausalLM.from_config(config, dtype=torch.bfloat16).cuda().eval()
         tokenizer = None
@@ -46,8 +48,8 @@ def prepare(args):
         prompts = [[1, 13, 15, 17], [2, 18, 20, 22, 24]]
     else:
         tokenizer = AutoTokenizer.from_pretrained(args.model, local_files_only=True)
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model, dtype=torch.bfloat16, device_map="cuda", local_files_only=True,
+        model = load_source_model(
+            args.model, dtype=torch.bfloat16, local_files_only=True,
             attn_implementation="sdpa", experts_implementation="eager").eval()
         calibration = [tokenizer(text, return_tensors="pt", truncation=True, max_length=64).input_ids.cuda()
                        for text in CALIBRATION]
@@ -68,7 +70,7 @@ def prepare(args):
     plan = P.pick_neurons_to_drop(scores, 0.5, args.scope)
     calibration_lengths = [batch.shape[-1] for batch in calibration]
     P.zero_dropped_neurons(handles, plan)
-    masked = args.output / "masked"
+    masked = args.masked_dir or args.output / "masked"
     model.save_pretrained(masked, max_shard_size="4GB")
     if tokenizer is not None:
         tokenizer.save_pretrained(masked)
@@ -117,8 +119,11 @@ def prepare(args):
                                   argmax_equal=torch.equal(a.argmax(-1), b.argmax(-1))))
         if args.model == "tiny":
             torch.testing.assert_close(a, b, rtol=0.04, atol=0.015)
-        elif cosine < 0.995 or kl > 0.01:
+        elif (cosine < 0.995 or kl > 0.01) and not args.allow_logit_drift:
             raise AssertionError(f"Full BF16 numerical sanity check failed: {logit_metrics[-1]}")
+    bf16_sanity = all(m["cosine"] >= 0.995 and m["reference_to_compact_kl"] <= 0.01 for m in logit_metrics)
+    if not bf16_sanity:
+        print("BF16 NUMERICAL CHECK FAILED: recording drift and continuing the explicitly requested inference check", flush=True)
     compact = args.output / "compact"
     save_checkpoint(model, compact, tokenizer)
     restored = load_checkpoint(compact, attn_implementation="sdpa")
@@ -131,11 +136,16 @@ def prepare(args):
         torch.testing.assert_close(a, b, rtol=0, atol=0)
     all_widths = [w for ws in summary["expert_intermediate_sizes"].values() for w in ws]
     summary.update(model=args.model, pretrained=args.model != "tiny", scope=args.scope, drop_ratio=0.5,
+                   family=model.config.model_type, masked_checkpoint=str(masked),
+                   calibration_texts=CALIBRATION if args.model != "tiny" else None,
+                   prompt_texts=PROMPTS if args.model != "tiny" else None,
                    original_parameters=original_parameters, num_layers=model.config.num_hidden_layers,
                    num_experts=model.config.num_experts, hidden_size=model.config.hidden_size,
                    width_min=min(all_widths), width_max=max(all_widths), distinct_widths=len(set(all_widths)),
                    hf_logits_max_abs=error, hf_argmax_equal=all(torch.equal(a.argmax(-1), b.argmax(-1)) for a, b in zip(actual, expected)),
                    hf_logit_metrics=logit_metrics, fp32_expert_checks=fp32_checks, fp32_expert_max_abs=fp32_error,
+                   hf_bf16_sanity_passed=bf16_sanity,
+                   hf_bf16_sanity_thresholds=dict(min_cosine=0.995, max_reference_to_compact_kl=0.01),
                    reload_weights_exact=True, reload_logits_exact=True,
                    calibration_samples=len(CALIBRATION) if args.model != "tiny" else 2,
                    calibration_token_lengths=calibration_lengths,
@@ -151,7 +161,7 @@ def generate(args):
     from vllm import LLM, SamplingParams
     import vllm
     metadata = json.loads((args.output / "prepare.json").read_text())
-    checkpoint = args.output / args.checkpoint
+    checkpoint = Path(metadata.get("masked_checkpoint", args.output / "masked")) if args.checkpoint == "masked" else args.output / "compact"
     engine = LLM(model=str(checkpoint), skip_tokenizer_init=True, dtype="bfloat16",
                  enforce_eager=True, tensor_parallel_size=1, max_model_len=256,
                  max_num_seqs=2, max_num_batched_tokens=256, gpu_memory_utilization=args.gpu_memory_utilization,
@@ -181,6 +191,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["prepare", "generate"])
     parser.add_argument("--model", default="tiny")
+    parser.add_argument("--family", choices=["qwen2_moe", "olmoe", "qwen3_moe", "qwen3_5_moe_35b"], default="qwen3_moe")
+    parser.add_argument("--masked-dir", type=Path, help="Optional temporary baseline directory, e.g. on tmpfs")
+    parser.add_argument("--allow-logit-drift", action="store_true",
+                        help="Record a failed full-model BF16 sanity check but continue export/inference; FP32 and exact reload checks remain mandatory")
     parser.add_argument("--scope", choices=["layer", "global"], default="layer")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--scores", type=Path)

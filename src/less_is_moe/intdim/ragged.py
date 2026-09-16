@@ -1,4 +1,4 @@
-"""Version 1 compact, non-uniform Qwen3-MoE checkpoints (GPU inference).
+"""Version 1 compact, non-uniform SiLU MoE checkpoints (GPU inference).
 
 Each layer stores two flat tensors, in original expert-ID order. For expert e,
 gate/up is row-major [2*I_e, H], gate rows first; down is [H, I_e]. Widths in
@@ -16,16 +16,31 @@ from torch import nn
 from torch.nn import functional as F
 
 ARCHITECTURE = "RaggedQwen3MoeForCausalLM"
+ARCHITECTURES = {
+    "qwen2_moe": "RaggedQwen2MoeForCausalLM",
+    "olmoe": "RaggedOlmoeForCausalLM",
+    "qwen3_moe": ARCHITECTURE,
+    "qwen3_5_moe_text": "RaggedQwen3_5MoeForCausalLM",
+}
 LAYOUT = "flat_gate_up_down_v1"
 
 
-def validate_metadata(config) -> dict[str, list[int]]:
-    if config.model_type != "qwen3_moe" or config.hidden_act != "silu":
-        raise ValueError("Ragged v1 supports only SiLU Qwen3-MoE")
+def validate_family(config):
+    """Only audited bias-free SiLU causal-LM families may use this format."""
+    if config.model_type not in ARCHITECTURES or config.hidden_act != "silu":
+        raise ValueError("Ragged v1 supports SiLU Qwen2-MoE, OLMoE, Qwen3-MoE and Qwen3.5-MoE text models")
     if getattr(config, "quantization_config", None):
         raise ValueError("Ragged v1 does not support quantized checkpoints")
-    if getattr(config, "mlp_only_layers", []) or config.decoder_sparse_step != 1:
+    if getattr(config, "mlp_only_layers", []) or getattr(config, "decoder_sparse_step", 1) != 1:
         raise ValueError("Ragged v1 requires an MoE block in every decoder layer")
+
+
+def original_width(config):
+    return config.intermediate_size if config.model_type == "olmoe" else config.moe_intermediate_size
+
+
+def validate_metadata(config) -> dict[str, list[int]]:
+    validate_family(config)
     meta = getattr(config, "less_is_moe", None)
     if not isinstance(meta, dict) or meta.get("format_version") != 1 or meta.get("weight_layout") != LAYOUT:
         raise ValueError("Missing or unsupported less_is_moe checkpoint format")
@@ -35,7 +50,7 @@ def validate_metadata(config) -> dict[str, list[int]]:
     for layer, values in widths.items():
         if not isinstance(values, list) or len(values) != config.num_experts:
             raise ValueError(f"Layer {layer}: width count must match num_experts")
-        if any(type(v) is not int or not 0 <= v <= config.moe_intermediate_size for v in values):
+        if any(type(v) is not int or not 0 <= v <= original_width(config) for v in values):
             raise ValueError(f"Layer {layer}: invalid expert width")
     return widths
 
@@ -85,7 +100,7 @@ def compact_model(model, handles, drop_plan):
     # Validate the entire plan before mutating any weights.
     for h in handles:
         if h.layer_index is None or h.name != f"model.layers.{h.layer_index}.mlp.experts":
-            raise ValueError("Unexpected Qwen3-MoE expert path")
+            raise ValueError("Unexpected causal-LM expert path")
         if h.kind == "fused" and (h.gate_up_bias is not None or h.down_bias is not None):
             raise ValueError("Ragged v1 supports bias-free experts only")
         keep = []
@@ -115,7 +130,7 @@ def compact_model(model, handles, drop_plan):
         parent, name = h.name.rsplit(".", 1)
         setattr(model.get_submodule(parent), name, packed)
     model.config.less_is_moe = config.less_is_moe
-    model.config.architectures = [ARCHITECTURE]
+    model.config.architectures = [ARCHITECTURES[model.config.model_type]]
     return dict(format_version=1, original_parameters=original_count,
                 compact_parameters=sum(p.numel() for p in model.parameters()),
                 expert_intermediate_sizes=widths)
@@ -128,15 +143,19 @@ def save_checkpoint(model, directory, tokenizer=None):
     model.save_pretrained(directory, save_original_format=False, max_shard_size="4GB")
     # save_pretrained uses the live Python class, which may still be the stock
     # class immediately after in-place compaction. Explicitly mark the format.
-    model.config.architectures = [ARCHITECTURE]
+    model.config.architectures = [ARCHITECTURES[model.config.model_type]]
     model.config.save_pretrained(directory)
     if tokenizer is not None:
         tokenizer.save_pretrained(directory)
 
 
 def load_checkpoint(directory, *, dtype=torch.bfloat16, **kwargs):
-    from .ragged_hf import RaggedQwen3MoeForCausalLM
+    from transformers import AutoConfig
+    from . import ragged_hf
     if not torch.cuda.is_available():
         raise RuntimeError("Ragged checkpoint verification requires a GPU")
-    return RaggedQwen3MoeForCausalLM.from_pretrained(
+    config = AutoConfig.from_pretrained(directory)
+    validate_metadata(config)
+    cls = getattr(ragged_hf, ARCHITECTURES[config.model_type])
+    return cls.from_pretrained(
         Path(directory), dtype=dtype, device_map="cuda", **kwargs).eval()

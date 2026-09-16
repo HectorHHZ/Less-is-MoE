@@ -22,11 +22,11 @@ def require_gpu():
         pytest.skip("GPU-only ragged validation")
 
 
-@pytest.fixture
-def model():
+@pytest.fixture(params=["qwen2_moe", "olmoe", "qwen3_moe", "qwen3_5_moe_35b"])
+def model(request):
     require_gpu()
     torch.manual_seed(7)
-    config = make_config("qwen3_moe")
+    config = make_config(request.param).get_text_config()
     config._experts_implementation = "eager"
     return AutoModelForCausalLM.from_config(config, dtype=torch.bfloat16).cuda().eval()
 
@@ -41,6 +41,10 @@ def test_calibrated_roundtrip(model, scope, tmp_path):
     reference = copy.deepcopy(model)
     P.zero_dropped_neurons(discover(reference), plan)
     summary = compact_model(model, handles, plan)
+    # In particular, shared experts and their gates must not be pruned.
+    for name, value in reference.state_dict().items():
+        if ".mlp.experts." not in name:
+            assert torch.equal(value, model.state_dict()[name]), name
     assert summary["compact_parameters"] < summary["original_parameters"]
     assert len({w for ws in summary["expert_intermediate_sizes"].values() for w in ws}) > 1
     tokens = torch.tensor([[1, 13, 15, 17]], device="cuda")

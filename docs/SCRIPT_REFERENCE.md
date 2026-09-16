@@ -36,7 +36,8 @@ width; the scripts reject layer/global masks instead of writing an unloadable
 checkpoint.
 
 The newer unified command `python -m less_is_moe.intdim.prune --mode ragged`
-can compact non-uniform Qwen3-MoE layer/global plans using a dedicated checkpoint
+can compact non-uniform Qwen1.5-MoE, OLMoE, Qwen3-MoE and Qwen3.5-MoE text
+layer/global plans using a dedicated checkpoint
 format and vLLM plugin. See [ragged expert support](RAGGED_EXPERTS.md) for its
 GPU-only scope and loader requirements; this does not change the legacy
 per-family scripts described above.

@@ -14,7 +14,7 @@ The importance criterion, selection scopes, and outputs are unchanged:
   in every expert; ``layer`` (IntDim-L) pools units across the experts of a layer;
   ``global`` (IntDim-G) pools units across all layers.
 * **Apply.** ``mask`` keeps tensor shapes; ``structural`` removes equal counts
-  with stock loaders; ``ragged`` exports unequal Qwen3-MoE widths for our plugin.
+  with stock loaders; ``ragged`` exports unequal SiLU MoE widths for our plugin.
 
 The arithmetic follows the per-family scripts operation for operation, including
 where each reduction runs, so scores and outputs match them exactly.
@@ -387,7 +387,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model_name_or_path", required=True)
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--mode", choices=("mask", "structural", "ragged"), required=True,
-                        help="mask: zero units; structural: uniform stock-loader checkpoint; ragged: compact Qwen3-MoE plugin checkpoint")
+                        help="mask: zero units; structural: uniform stock-loader checkpoint; ragged: compact SiLU MoE plugin checkpoint")
     parser.add_argument("--prune_mode", choices=PRUNE_MODES, default="expert",
                         help="Selection scope: expert (IntDim-E), layer (IntDim-L), global (IntDim-G). Structural mode requires expert.")
     parser.add_argument("--drop_ratio", type=float, default=None, help="Fraction of units to drop, in (0, 1)")
@@ -424,16 +424,9 @@ def prune(model: nn.Module, args: argparse.Namespace, calib_batches: Iterable[to
     """Run the full pipeline on a loaded model and return the summary (weights are modified in place)."""
     validate_args(args)
     if args.mode == "ragged":
-        from .ragged import LAYOUT, validate_metadata
-        import copy
+        from .ragged import validate_family
         # Fail before expensive calibration for unsupported model families.
-        config = copy.deepcopy(model.config)
-        if config.model_type != "qwen3_moe":
-            raise ValueError("Ragged v1 supports Qwen3-MoE only")
-        config.less_is_moe = dict(format_version=1, weight_layout=LAYOUT,
-                                 expert_intermediate_sizes={str(i): [config.moe_intermediate_size] * config.num_experts
-                                                            for i in range(config.num_hidden_layers)})
-        validate_metadata(config)
+        validate_family(model.config)
         if any(p.device.type != "cuda" for p in model.parameters()):
             raise ValueError("Ragged pruning requires the entire model on GPU")
     batches = None if args.from_zeroed_model else list(calib_batches or [])
@@ -515,7 +508,11 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Loading model from {args.model_name_or_path} ...")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, trust_remote_code=True)
-    model = load_model(args.model_name_or_path, dtype)
+    if args.mode == "ragged":
+        from .ragged_hf import load_source_model
+        model = load_source_model(args.model_name_or_path, dtype=dtype, experts_implementation="eager")
+    else:
+        model = load_model(args.model_name_or_path, dtype)
     model.eval()
     batches = None if args.from_zeroed_model else load_calibration(args, tokenizer)
     if batches is not None:

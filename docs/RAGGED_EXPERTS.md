@@ -1,4 +1,4 @@
-# Non-uniform Qwen3-MoE experts
+# Non-uniform MoE experts
 
 IntDim-L/G selects neurons with the existing calibration-gradient algorithm.
 The new `ragged` export mode physically removes those neurons even when each
@@ -8,8 +8,13 @@ retain their existing behavior.
 
 ## Supported first implementation
 
-- Qwen3-MoE, including Qwen3-Coder-30B-A3B; SiLU, bias-free routed experts,
-  one MoE block per decoder layer. Other families are rejected before scoring.
+- Qwen1.5-MoE (`qwen2_moe`), OLMoE, Qwen3-MoE and the Qwen3.5-MoE text tower:
+  SiLU, bias-free routed experts, one MoE block per decoder layer.
+  Other families are rejected before scoring. All four families share the same
+  packed layout and GPU kernels; only model construction/loading differs.
+- Shared experts, gates and each family's routing normalization remain intact.
+  Qwen3.5 retains every language layer, including Gated DeltaNet attention;
+  vision and MTP weights are not part of the exported causal language model.
 - GPU inference only. vLLM **0.29.0**, BF16, one GPU (TP=PP=DP=1), eager mode.
 - Unequal widths, widths not divisible by kernel tile size, zero-width experts,
   and all-zero expert layers preserve their original router IDs and weights.
@@ -19,7 +24,16 @@ retain their existing behavior.
 
 ## Format
 
-`config.json` has `architectures: ["RaggedQwen3MoeForCausalLM"]` and:
+`config.json` uses the corresponding registered architecture:
+
+| Original model type | Compact architecture |
+| --- | --- |
+| `qwen2_moe` | `RaggedQwen2MoeForCausalLM` |
+| `olmoe` | `RaggedOlmoeForCausalLM` |
+| `qwen3_moe` | `RaggedQwen3MoeForCausalLM` |
+| `qwen3_5_moe_text` | `RaggedQwen3_5MoeForCausalLM` |
+
+All four add the same metadata:
 
 ```json
 {
@@ -33,7 +47,7 @@ retain their existing behavior.
 
 Layer IDs and original expert IDs determine the order. The example has two
 layers and three experts; a real config must describe every layer/expert.
-`moe_intermediate_size` remains the original scalar width. The custom loader
+`moe_intermediate_size` (OLMoE: `intermediate_size`) remains the original scalar width. The custom loader
 uses `expert_intermediate_sizes` as authoritative for compact expert tensors.
 
 For each layer, two flat safetensors parameters retain the names
@@ -55,7 +69,7 @@ All third-party versions remain pinned. The model must fit entirely on GPU.
 
 ```bash
 python -m less_is_moe.intdim.prune \
-  --model_name_or_path /models/Qwen3-Coder-30B-A3B-Instruct \
+  --model_name_or_path /models/Qwen3-30B-A3B \
   --output_dir /outputs/qwen-layer \
   --mode ragged --prune_mode layer --drop_ratio 0.5 \
   --calib_data /data/calibration.jsonl --n_samples 128 --seq_len 256 --dtype bf16
@@ -76,7 +90,7 @@ VLLM_PLUGINS=less_is_moe_ragged vllm serve /outputs/qwen-layer \
   --dtype bfloat16 --tensor-parallel-size 1 --enforce-eager
 ```
 
-This registers a new architecture; it does not replace the stock Qwen classes
+This registers separate architectures; it does not replace the stock model classes
 or enable the historical model patches. Model files do not execute remote code.
 
 ## GPU kernel
@@ -92,6 +106,27 @@ optimal ragged tile scheduler. The HF reference intentionally uses per-expert
 GPU operations and is a correctness oracle, not the accelerated backend.
 
 ## Reproduce validation
+
+One shared full-model harness runs both IntDim-L and IntDim-G at 50%, saves
+both compact checkpoints, verifies exact HF reload, and generates with stock
+zero-mask vLLM and adapted compact vLLM in separate processes:
+
+```bash
+python -m docker.ragged_model_matrix --case qwen15 --model /models/Qwen1.5-MoE-A2.7B --output /results/qwen15
+python -m docker.ragged_model_matrix --case olmoe --model /models/OLMoE-1B-7B-0924 --output /results/olmoe
+python -m docker.ragged_model_matrix --case qwen3 --model /models/Qwen3-30B-A3B --output /results/qwen3
+python -m docker.ragged_model_matrix --case qwen35 --model /models/Qwen3.5-35B-A3B --output /results/qwen35
+```
+
+Run sequentially per GPU. `--scratch` defaults to `/dev/shm` for temporary
+zero-mask baselines; use a disk directory with enough space if needed. Compact
+checkpoints remain under `<output>/{layer,global}/compact`. The harness uses
+the same four short calibration texts, two held-out prompts and 128 generated
+tokens per prompt for each model. Tokenization differs by model. It verifies
+the original layer/expert/hidden dimensions and the exact 50% neuron budget.
+Use `--max-tokens` to change generation length. Each matrix records token
+match counts, common-prefix lengths and the first differing generated token.
+This is a full-weight pipeline smoke test, not a quality or speed benchmark.
 
 From the repository root, inside the pinned image with a visible B200:
 
@@ -131,7 +166,12 @@ experts in every layer against their zero-masked counterpart in FP32 on GPU
 maximum error, RMSE, cosine similarity, KL divergence and first-token agreement.
 For full checkpoints, cosine >= 0.995 and reference-to-compact KL <= 0.01 are
 numerical sanity gates on the two smoke prompts, not an accuracy benchmark or
-a claim that every output token will match. Tiny fixtures retain a direct
+a claim that every output token will match. The standalone harness fails when
+these gates fail by default. The four-model matrix explicitly passes
+`--allow-logit-drift`: it preserves the failed numerical check in the report
+and independently completes checkpoint/reload/inference validation. FP32 expert
+checks and exact reload checks remain mandatory. An inference pass must not be
+reported as a passed numerical-equivalence check. Tiny fixtures retain a direct
 elementwise BF16 comparison. The first full-model elementwise tolerance check
 failed; that difference is retained in the validation report rather than
 being described as exact equivalence.
