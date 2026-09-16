@@ -1,0 +1,916 @@
+{
+  "date": "2026-09-16",
+  "issue": 29,
+  "pr": 30,
+  "runtime_source_commit": "e4f1c6c27d3ac21193266207ce29bdc0aaee510c",
+  "runtime_source_sha256": {
+    "src/less_is_moe/intdim/ragged.py": "9247375f93c138d365bc82ad49e3776af69708a4808c029166b894be6e34f4c9",
+    "src/less_is_moe/intdim/ragged_vllm.py": "6b01278e31b42052f05c4b2d6e376cef7e2223fe3f470d4013a30afdc77c9b63",
+    "src/less_is_moe/intdim/ragged_hf.py": "e527191e24e09d8774069297b963c5c67a5e9a9ca226b8786bbd78f23c70606e",
+    "src/less_is_moe/intdim/ragged_triton.py": "203846bc361fd62b31c748139cdd1363e2f265eef73d92720af8899dcb3e2b96",
+    "src/less_is_moe/intdim/ragged_plugin.py": "f2d98cf96660d7b63d5fcdc89fcc868c1e56ef8b17ae8edd225841030c6384a0",
+    "src/less_is_moe/intdim/prune.py": "ca9866a6bb9c0e4bd623fe9df1447eaa3a3a0aaf9b3cac285d660182c38069e9",
+    "docker/ragged_qwen_smoke.py": "2e1ae4a55d83ddaa5398d8500b9135fe7fb336ce9a6fdea8a1dc11ce03d5eda4",
+    "tests/test_ragged_intdim.py": "db95c218cadf631a250c8303d755bf715b5f10c33632564ef8362cca18cd2160"
+  },
+  "environment": {
+    "environment": "unified",
+    "python": "3.12.14",
+    "cuda": "13.0",
+    "locked_packages": 211,
+    "versions": {
+      "torch": "2.13.0+cu130",
+      "transformers": "5.17.0",
+      "vllm": "0.29.0",
+      "tokenizers": "0.23.1"
+    },
+    "gpu": {
+      "device": "NVIDIA B200",
+      "capability": [
+        10,
+        0
+      ],
+      "checks": [
+        "bf16_matmul",
+        "vllm_rms_norm"
+      ]
+    }
+  },
+  "base_image_id": "sha256:959d2ed008772283e20a0d7302eb9663be56c1dea51122e2451ce3ff1f1d3cb1",
+  "host_gpu": 5,
+  "pretrained_checkpoint": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+  "gpu_tests": {
+    "passed": 15,
+    "seconds": 14.75,
+    "model_execution": "GPU only"
+  },
+  "cases": {
+    "tiny-layer": {
+      "preparation": {
+        "format_version": 1,
+        "original_parameters": 952192,
+        "compact_parameters": 558976,
+        "model": "tiny",
+        "pretrained": false,
+        "scope": "layer",
+        "drop_ratio": 0.5,
+        "num_layers": 2,
+        "num_experts": 4,
+        "hidden_size": 128,
+        "width_min": 8,
+        "width_max": 232,
+        "distinct_widths": 8,
+        "hf_logits_max_abs": 0.0,
+        "hf_argmax_equal": true,
+        "reload_weights_exact": true,
+        "reload_logits_exact": true,
+        "calibration_samples": 2,
+        "prompt_token_ids": [
+          [
+            1,
+            13,
+            15,
+            17
+          ],
+          [
+            2,
+            18,
+            20,
+            22,
+            24
+          ]
+        ],
+        "torch": "2.13.0+cu130",
+        "transformers": "5.17.0",
+        "gpu": "NVIDIA B200",
+        "dtype": "bfloat16",
+        "peak_allocated_bytes": 71651328,
+        "elapsed_seconds": 2.023791790008545,
+        "total_retained_expert_neurons": 1024,
+        "zero_width_experts": 0,
+        "per_layer_retained_neurons": {
+          "0": 512,
+          "1": 512
+        }
+      },
+      "stock_vllm": {
+        "checkpoint": "/results/tiny-layer/masked",
+        "vllm": "0.29.0",
+        "backend": "stock_triton",
+        "dtype": "bfloat16",
+        "tensor_parallel_size": 1,
+        "enforce_eager": true,
+        "max_model_len": 256,
+        "max_tokens": 4,
+        "outputs": [
+          {
+            "token_ids": [
+              254,
+              200,
+              95,
+              101
+            ],
+            "first_logprobs": {
+              "254": -4.9072675704956055,
+              "143": -4.9228925704956055,
+              "157": -4.9463300704956055,
+              "10": -5.0205488204956055,
+              "97": -5.0283613204956055
+            }
+          },
+          {
+            "token_ids": [
+              84,
+              84,
+              255,
+              244
+            ],
+            "first_logprobs": {
+              "84": -4.661406517028809,
+              "224": -4.919219017028809,
+              "244": -5.036406517028809,
+              "255": -5.087187767028809,
+              "75": -5.120390892028809
+            }
+          }
+        ]
+      },
+      "ragged_vllm": {
+        "checkpoint": "/results/tiny-layer/compact",
+        "vllm": "0.29.0",
+        "backend": "ragged_triton",
+        "dtype": "bfloat16",
+        "tensor_parallel_size": 1,
+        "enforce_eager": true,
+        "max_model_len": 256,
+        "max_tokens": 4,
+        "outputs": [
+          {
+            "token_ids": [
+              254,
+              200,
+              95,
+              101
+            ],
+            "first_logprobs": {
+              "254": -4.9111199378967285,
+              "143": -4.9228386878967285,
+              "157": -4.9462761878967285,
+              "10": -5.0204949378967285,
+              "97": -5.0283074378967285
+            }
+          },
+          {
+            "token_ids": [
+              84,
+              84,
+              255,
+              244
+            ],
+            "first_logprobs": {
+              "84": -4.661445617675781,
+              "224": -4.919258117675781,
+              "244": -5.040351867675781,
+              "255": -5.087226867675781,
+              "75": -5.118476867675781
+            }
+          }
+        ]
+      },
+      "comparison": [
+        {
+          "generated_tokens": 4,
+          "exact_match": true,
+          "matching_positions": 4,
+          "matching_prefix_tokens": 4
+        },
+        {
+          "generated_tokens": 4,
+          "exact_match": true,
+          "matching_positions": 4,
+          "matching_prefix_tokens": 4
+        }
+      ]
+    },
+    "tiny-global": {
+      "preparation": {
+        "format_version": 1,
+        "original_parameters": 952192,
+        "compact_parameters": 558976,
+        "model": "tiny",
+        "pretrained": false,
+        "scope": "global",
+        "drop_ratio": 0.5,
+        "num_layers": 2,
+        "num_experts": 4,
+        "hidden_size": 128,
+        "width_min": 2,
+        "width_max": 239,
+        "distinct_widths": 8,
+        "hf_logits_max_abs": 0.0,
+        "hf_argmax_equal": true,
+        "reload_weights_exact": true,
+        "reload_logits_exact": true,
+        "calibration_samples": 2,
+        "prompt_token_ids": [
+          [
+            1,
+            13,
+            15,
+            17
+          ],
+          [
+            2,
+            18,
+            20,
+            22,
+            24
+          ]
+        ],
+        "torch": "2.13.0+cu130",
+        "transformers": "5.17.0",
+        "gpu": "NVIDIA B200",
+        "dtype": "bfloat16",
+        "peak_allocated_bytes": 71651328,
+        "elapsed_seconds": 1.784170389175415,
+        "total_retained_expert_neurons": 1024,
+        "zero_width_experts": 0,
+        "per_layer_retained_neurons": {
+          "0": 626,
+          "1": 398
+        }
+      },
+      "stock_vllm": {
+        "checkpoint": "/results/tiny-global/masked",
+        "vllm": "0.29.0",
+        "backend": "stock_triton",
+        "dtype": "bfloat16",
+        "tensor_parallel_size": 1,
+        "enforce_eager": true,
+        "max_model_len": 256,
+        "max_tokens": 4,
+        "outputs": [
+          {
+            "token_ids": [
+              254,
+              200,
+              95,
+              101
+            ],
+            "first_logprobs": {
+              "254": -4.903567790985107,
+              "143": -4.934817790985107,
+              "157": -4.958255290985107,
+              "10": -5.012942790985107,
+              "97": -5.040286540985107
+            }
+          },
+          {
+            "token_ids": [
+              84,
+              84,
+              255,
+              244
+            ],
+            "first_logprobs": {
+              "84": -4.67616605758667,
+              "224": -4.92616605758667,
+              "244": -5.05116605758667,
+              "255": -5.10194730758667,
+              "75": -5.11952543258667
+            }
+          }
+        ]
+      },
+      "ragged_vllm": {
+        "checkpoint": "/results/tiny-global/compact",
+        "vllm": "0.29.0",
+        "backend": "ragged_triton",
+        "dtype": "bfloat16",
+        "tensor_parallel_size": 1,
+        "enforce_eager": true,
+        "max_model_len": 256,
+        "max_tokens": 4,
+        "outputs": [
+          {
+            "token_ids": [
+              254,
+              200,
+              95,
+              101
+            ],
+            "first_logprobs": {
+              "254": -4.903648376464844,
+              "143": -4.934898376464844,
+              "157": -4.958335876464844,
+              "10": -5.013023376464844,
+              "97": -5.036460876464844
+            }
+          },
+          {
+            "token_ids": [
+              84,
+              84,
+              255,
+              244
+            ],
+            "first_logprobs": {
+              "84": -4.680141448974609,
+              "224": -4.926235198974609,
+              "244": -5.051235198974609,
+              "255": -5.100063323974609,
+              "75": -5.121547698974609
+            }
+          }
+        ]
+      },
+      "comparison": [
+        {
+          "generated_tokens": 4,
+          "exact_match": true,
+          "matching_positions": 4,
+          "matching_prefix_tokens": 4
+        },
+        {
+          "generated_tokens": 4,
+          "exact_match": true,
+          "matching_positions": 4,
+          "matching_prefix_tokens": 4
+        }
+      ]
+    },
+    "full-layer": {
+      "preparation": {
+        "format_version": 1,
+        "original_parameters": 30532122624,
+        "compact_parameters": 16036608000,
+        "model": "/models/qwen3-coder",
+        "pretrained": true,
+        "scope": "layer",
+        "drop_ratio": 0.5,
+        "num_layers": 48,
+        "num_experts": 128,
+        "hidden_size": 2048,
+        "width_min": 0,
+        "width_max": 768,
+        "distinct_widths": 451,
+        "hf_logits_max_abs": 0.953125,
+        "hf_argmax_equal": true,
+        "hf_logit_metrics": [
+          {
+            "max_abs": 0.40625,
+            "rmse": 0.08729533106088638,
+            "cosine": 0.9992088675498962,
+            "reference_to_compact_kl": 0.007053992711007595,
+            "argmax_equal": true
+          },
+          {
+            "max_abs": 0.953125,
+            "rmse": 0.17297567427158356,
+            "cosine": 0.9982408285140991,
+            "reference_to_compact_kl": 0.0009239284554496408,
+            "argmax_equal": true
+          }
+        ],
+        "fp32_expert_checks": 144,
+        "fp32_expert_max_abs": 7.152557373046875e-07,
+        "reload_weights_exact": true,
+        "reload_logits_exact": true,
+        "calibration_samples": 4,
+        "calibration_token_lengths": [
+          21,
+          19,
+          23,
+          19
+        ],
+        "prompt_token_ids": [
+          [
+            750,
+            75698,
+            1445,
+            982,
+            262,
+            4210,
+            5598,
+            279,
+            55129,
+            79683,
+            1372,
+            14442
+          ],
+          [
+            840,
+            20772,
+            3170,
+            279,
+            12884,
+            7952,
+            6303,
+            304,
+            1378,
+            22870,
+            13
+          ]
+        ],
+        "torch": "2.13.0+cu130",
+        "transformers": "5.17.0",
+        "gpu": "NVIDIA B200",
+        "dtype": "bfloat16",
+        "peak_allocated_bytes": 99777698816,
+        "elapsed_seconds": 99.63879013061523,
+        "total_retained_expert_neurons": 2359296,
+        "zero_width_experts": 2766,
+        "per_layer_retained_neurons": {
+          "0": 49152,
+          "1": 49152,
+          "2": 49152,
+          "3": 49152,
+          "4": 49152,
+          "5": 49152,
+          "6": 49152,
+          "7": 49152,
+          "8": 49152,
+          "9": 49152,
+          "10": 49152,
+          "11": 49152,
+          "12": 49152,
+          "13": 49152,
+          "14": 49152,
+          "15": 49152,
+          "16": 49152,
+          "17": 49152,
+          "18": 49152,
+          "19": 49152,
+          "20": 49152,
+          "21": 49152,
+          "22": 49152,
+          "23": 49152,
+          "24": 49152,
+          "25": 49152,
+          "26": 49152,
+          "27": 49152,
+          "28": 49152,
+          "29": 49152,
+          "30": 49152,
+          "31": 49152,
+          "32": 49152,
+          "33": 49152,
+          "34": 49152,
+          "35": 49152,
+          "36": 49152,
+          "37": 49152,
+          "38": 49152,
+          "39": 49152,
+          "40": 49152,
+          "41": 49152,
+          "42": 49152,
+          "43": 49152,
+          "44": 49152,
+          "45": 49152,
+          "46": 49152,
+          "47": 49152
+        }
+      },
+      "stock_vllm": {
+        "checkpoint": "/results/full-layer/masked",
+        "vllm": "0.29.0",
+        "backend": "stock_triton",
+        "dtype": "bfloat16",
+        "tensor_parallel_size": 1,
+        "enforce_eager": true,
+        "max_model_len": 256,
+        "max_tokens": 16,
+        "outputs": [
+          {
+            "token_ids": [
+              262,
+              421,
+              308,
+              621,
+              220,
+              15,
+              510,
+              262,
+              470,
+              220,
+              15,
+              198,
+              262,
+              4409,
+              308,
+              621
+            ],
+            "first_logprobs": {
+              "262": -0.9887511134147644,
+              "198": -1.3637511730194092,
+              "750": -1.4887511730194092,
+              "2": -3.613751173019409,
+              "1066": -3.738751173019409
+            },
+            "text": "    if n == 0:\n    return 0\n    elif n =="
+          },
+          {
+            "token_ids": [
+              576,
+              12884,
+              7952,
+              6303,
+              1576,
+              1039,
+              6414,
+              44393,
+              279,
+              92859,
+              315,
+              3100,
+              25911,
+              553,
+              279,
+              7015
+            ],
+            "first_logprobs": {
+              "576": -0.020656226202845573,
+              "715": -5.520656108856201,
+              "220": -5.520656108856201,
+              "4710": -5.645656108856201,
+              "21806": -6.395656108856201
+            },
+            "text": " The sky appears blue because our eyes perceive the wavelengths of light reflected by the sun"
+          }
+        ]
+      },
+      "ragged_vllm": {
+        "checkpoint": "/results/full-layer/compact",
+        "vllm": "0.29.0",
+        "backend": "ragged_triton",
+        "dtype": "bfloat16",
+        "tensor_parallel_size": 1,
+        "enforce_eager": true,
+        "max_model_len": 256,
+        "max_tokens": 16,
+        "outputs": [
+          {
+            "token_ids": [
+              262,
+              421,
+              308,
+              621,
+              220,
+              15,
+              510,
+              262,
+              470,
+              220,
+              15,
+              198,
+              262,
+              4409,
+              308,
+              621
+            ],
+            "first_logprobs": {
+              "262": -1.1629865169525146,
+              "198": -1.2879865169525146,
+              "750": -1.4129865169525146,
+              "2": -3.4129865169525146,
+              "1066": -3.7879865169525146
+            },
+            "text": "    if n == 0:\n    return 0\n    elif n =="
+          },
+          {
+            "token_ids": [
+              576,
+              12884,
+              7952,
+              6303,
+              1576,
+              1039,
+              6414,
+              44393,
+              279,
+              92859,
+              315,
+              3100,
+              25911,
+              553,
+              279,
+              9237
+            ],
+            "first_logprobs": {
+              "576": -0.0274762324988842,
+              "4710": -5.1524763107299805,
+              "715": -5.1524763107299805,
+              "220": -5.2774763107299805,
+              "21806": -6.2774763107299805
+            },
+            "text": " The sky appears blue because our eyes perceive the wavelengths of light reflected by the Earth"
+          }
+        ]
+      },
+      "comparison": [
+        {
+          "generated_tokens": 16,
+          "exact_match": true,
+          "matching_positions": 16,
+          "matching_prefix_tokens": 16
+        },
+        {
+          "generated_tokens": 16,
+          "exact_match": false,
+          "matching_positions": 15,
+          "matching_prefix_tokens": 15
+        }
+      ]
+    },
+    "full-global": {
+      "preparation": {
+        "format_version": 1,
+        "original_parameters": 30532122624,
+        "compact_parameters": 16036608000,
+        "model": "/models/qwen3-coder",
+        "pretrained": true,
+        "scope": "global",
+        "drop_ratio": 0.5,
+        "num_layers": 48,
+        "num_experts": 128,
+        "hidden_size": 2048,
+        "width_min": 0,
+        "width_max": 768,
+        "distinct_widths": 413,
+        "hf_logits_max_abs": 1.5,
+        "hf_argmax_equal": true,
+        "hf_logit_metrics": [
+          {
+            "max_abs": 0.375,
+            "rmse": 0.06077089160680771,
+            "cosine": 0.999523401260376,
+            "reference_to_compact_kl": 0.005592124070972204,
+            "argmax_equal": true
+          },
+          {
+            "max_abs": 1.5,
+            "rmse": 0.279502272605896,
+            "cosine": 0.9955577850341797,
+            "reference_to_compact_kl": 0.002599506638944149,
+            "argmax_equal": true
+          }
+        ],
+        "fp32_expert_checks": 144,
+        "fp32_expert_max_abs": 5.960464477539062e-07,
+        "reload_weights_exact": true,
+        "reload_logits_exact": true,
+        "calibration_samples": 4,
+        "calibration_token_lengths": [
+          21,
+          19,
+          23,
+          19
+        ],
+        "prompt_token_ids": [
+          [
+            750,
+            75698,
+            1445,
+            982,
+            262,
+            4210,
+            5598,
+            279,
+            55129,
+            79683,
+            1372,
+            14442
+          ],
+          [
+            840,
+            20772,
+            3170,
+            279,
+            12884,
+            7952,
+            6303,
+            304,
+            1378,
+            22870,
+            13
+          ]
+        ],
+        "torch": "2.13.0+cu130",
+        "transformers": "5.17.0",
+        "gpu": "NVIDIA B200",
+        "dtype": "bfloat16",
+        "peak_allocated_bytes": 99781893120,
+        "elapsed_seconds": 97.68355059623718,
+        "total_retained_expert_neurons": 2359296,
+        "zero_width_experts": 2838,
+        "per_layer_retained_neurons": {
+          "0": 59222,
+          "1": 58640,
+          "2": 51162,
+          "3": 49133,
+          "4": 45470,
+          "5": 50306,
+          "6": 38896,
+          "7": 40812,
+          "8": 47469,
+          "9": 44891,
+          "10": 57761,
+          "11": 57068,
+          "12": 53453,
+          "13": 48850,
+          "14": 49113,
+          "15": 49759,
+          "16": 51184,
+          "17": 54277,
+          "18": 39321,
+          "19": 43832,
+          "20": 52467,
+          "21": 51360,
+          "22": 62232,
+          "23": 57067,
+          "24": 54041,
+          "25": 50986,
+          "26": 52763,
+          "27": 51164,
+          "28": 49203,
+          "29": 50928,
+          "30": 41146,
+          "31": 46872,
+          "32": 52747,
+          "33": 50508,
+          "34": 55672,
+          "35": 55485,
+          "36": 52416,
+          "37": 49647,
+          "38": 49584,
+          "39": 45393,
+          "40": 48516,
+          "41": 43176,
+          "42": 42850,
+          "43": 49627,
+          "44": 39027,
+          "45": 34139,
+          "46": 38902,
+          "47": 40759
+        }
+      },
+      "stock_vllm": {
+        "checkpoint": "/results/full-global/masked",
+        "vllm": "0.29.0",
+        "backend": "stock_triton",
+        "dtype": "bfloat16",
+        "tensor_parallel_size": 1,
+        "enforce_eager": true,
+        "max_model_len": 256,
+        "max_tokens": 16,
+        "outputs": [
+          {
+            "token_ids": [
+              198,
+              262,
+              421,
+              308,
+              621,
+              220,
+              15,
+              510,
+              262,
+              470,
+              220,
+              15,
+              198,
+              262,
+              421,
+              308
+            ],
+            "first_logprobs": {
+              "198": -1.0909698009490967,
+              "262": -1.2159698009490967,
+              "750": -1.7159698009490967,
+              "1066": -3.3409698009490967,
+              "333": -3.4659698009490967
+            },
+            "text": "\n    if n == 0:\n    return 0\n    if n"
+          },
+          {
+            "token_ids": [
+              576,
+              12884,
+              7952,
+              6303,
+              1576,
+              1039,
+              6414,
+              44393,
+              279,
+              92859,
+              315,
+              3100,
+              25911,
+              504,
+              279,
+              7015
+            ],
+            "first_logprobs": {
+              "576": -0.03057616576552391,
+              "7281": -5.530576229095459,
+              "715": -5.530576229095459,
+              "21806": -5.655576229095459,
+              "220": -5.655576229095459
+            },
+            "text": " The sky appears blue because our eyes perceive the wavelengths of light reflected from the sun"
+          }
+        ]
+      },
+      "ragged_vllm": {
+        "checkpoint": "/results/full-global/compact",
+        "vllm": "0.29.0",
+        "backend": "ragged_triton",
+        "dtype": "bfloat16",
+        "tensor_parallel_size": 1,
+        "enforce_eager": true,
+        "max_model_len": 256,
+        "max_tokens": 16,
+        "outputs": [
+          {
+            "token_ids": [
+              198,
+              262,
+              421,
+              308,
+              621,
+              220,
+              15,
+              510,
+              262,
+              470,
+              220,
+              15,
+              198,
+              262,
+              421,
+              308
+            ],
+            "first_logprobs": {
+              "198": -0.9555774927139282,
+              "262": -1.4555774927139282,
+              "750": -1.5805774927139282,
+              "1066": -3.4555773735046387,
+              "333": -3.6430773735046387
+            },
+            "text": "\n    if n == 0:\n    return 0\n    if n"
+          },
+          {
+            "token_ids": [
+              576,
+              12884,
+              7952,
+              6303,
+              1576,
+              1039,
+              6414,
+              44393,
+              279,
+              92859,
+              315,
+              3100,
+              25911,
+              504,
+              279,
+              7015
+            ],
+            "first_logprobs": {
+              "576": -0.03165927901864052,
+              "715": -5.406659126281738,
+              "7281": -5.531659126281738,
+              "21806": -5.531659126281738,
+              "220": -5.656659126281738
+            },
+            "text": " The sky appears blue because our eyes perceive the wavelengths of light reflected from the sun"
+          }
+        ]
+      },
+      "comparison": [
+        {
+          "generated_tokens": 16,
+          "exact_match": true,
+          "matching_positions": 16,
+          "matching_prefix_tokens": 16
+        },
+        {
+          "generated_tokens": 16,
+          "exact_match": true,
+          "matching_positions": 16,
+          "matching_prefix_tokens": 16
+        }
+      ]
+    }
+  },
+  "limitations": [
+    "BF16 full-model logits are not bitwise equivalent. Full L second completion differs at token 16.",
+    "Full calibration uses four short examples (82 tokens), and is not a model-quality evaluation.",
+    "No throughput or latency speedup is established.",
+    "BF16, single GPU, eager Qwen3-MoE only; no CUDA Graph, quantization, LoRA or EP/TP support.",
+    "Successful full preparation reports reuse cached scores; their memory/timing exclude the original gradient calibration."
+  ]
+}

@@ -208,6 +208,11 @@ python -m less_is_moe.intdim.prune \
 ```
 
 `--mode mask --prune_mode expert|layer|global` supports E/L/G zero-masking.
+
+For Qwen3-MoE, `--mode ragged --prune_mode layer|global` adds a separate compact
+non-uniform format. Its vLLM backend requires
+`VLLM_PLUGINS=less_is_moe_ragged`, BF16, one GPU and eager execution. See
+[ragged expert support](RAGGED_EXPERTS.md); stock runtime defaults stay the same.
 `--mode structural --from_zeroed_model` compacts a uniformly zero-masked
 checkpoint without calibration. Empty calibration for scoring is rejected.
 

@@ -146,6 +146,11 @@ reproduction, SFT and expert-drop baselines.
 See [Docker usage and GPU validation](docs/DOCKER.md) for exact scope, commands,
 locks, mounts, and the planned `0.1.0-unified` GHCR release.
 
+For unequal IntDim-L/G expert widths, the opt-in
+[Qwen3-MoE ragged GPU backend](docs/RAGGED_EXPERTS.md) adds compact checkpoint
+export, an explicit HF loader and vLLM integration on the same pinned runtime.
+It currently supports BF16, a single GPU and eager inference.
+
 ## Pruning
 
 Every shell launcher forwards its arguments to a package module. The following

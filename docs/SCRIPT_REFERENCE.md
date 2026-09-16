@@ -35,6 +35,12 @@ directly with `--drop_ratio`, or compact a compatible masked checkpoint with
 width; the scripts reject layer/global masks instead of writing an unloadable
 checkpoint.
 
+The newer unified command `python -m less_is_moe.intdim.prune --mode ragged`
+can compact non-uniform Qwen3-MoE layer/global plans using a dedicated checkpoint
+format and vLLM plugin. See [ragged expert support](RAGGED_EXPERTS.md) for its
+GPU-only scope and loader requirements; this does not change the legacy
+per-family scripts described above.
+
 | Family | Mask module | Structural module | Family-specific behavior |
 | --- | --- | --- | --- |
 | Qwen1.5/Qwen2-MoE | `neuron_drop_qwen15_moe` | `neuron_structure_drop_qwen15_moe` | Routed experts only; the shared expert is preserved. |
