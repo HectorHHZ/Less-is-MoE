@@ -129,16 +129,11 @@ jobs:
           esac
           docker run --rm "${gpu_args[@]}" --network none \
             "$local_image" python docker/smoke_test.py --gpu
-          docker run --rm "${gpu_args[@]}" --network none -e OMP_NUM_THREADS=2 \
-            "$local_image" python -m pytest tests/test_intdim_runtime.py tests/test_intdim_equivalence.py -q
+          docker run --rm "${gpu_args[@]}" --network none --shm-size=2g -e OMP_NUM_THREADS=2 \
+            -e INTDIM_TEST_VLLM=1 \
+            "$local_image" python -m pytest tests/test_intdim_runtime.py tests/test_intdim_equivalence.py -q -s
           docker run --rm "${gpu_args[@]}" --network none --shm-size=2g -e OMP_NUM_THREADS=2 \
             "$local_image" python docker/intdim_vllm_smoke.py --family all
-          docker run --rm "${gpu_args[@]}" --network none --shm-size=2g -e OMP_NUM_THREADS=2 \
-            -e INTDIM_TEST_VLLM=1 \
-            "$local_image" python -m pytest tests/test_intdim_new_models.py -q -s
-          docker run --rm "${gpu_args[@]}" --network none --shm-size=2g -e OMP_NUM_THREADS=2 \
-            -e INTDIM_TEST_VLLM=1 \
-            "$local_image" python -m pytest tests/test_intdim_zero_mask_equivalence.py -q -s
           {
             echo '### Unified environment'
             echo '```text'
