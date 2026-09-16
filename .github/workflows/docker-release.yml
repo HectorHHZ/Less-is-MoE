@@ -9,6 +9,8 @@ on:
       - 'environments/unified/**'
       - 'tests/**'
       - 'src/less_is_moe/intdim/**'
+      - 'src/less_is_moe/pruning/neuron_drop_gpt_oss.py'
+      - 'src/less_is_moe/pruning/neuron_drop_gemma4.py'
       - 'src/less_is_moe/model_patches/vllm_plugin.py'
       - 'src/less_is_moe/evaluation/**'
       - 'pyproject.toml'
@@ -134,6 +136,9 @@ jobs:
           docker run --rm "${gpu_args[@]}" --network none --shm-size=2g -e OMP_NUM_THREADS=2 \
             -e INTDIM_TEST_VLLM=1 \
             "$local_image" python -m pytest tests/test_intdim_new_models.py -q -s
+          docker run --rm "${gpu_args[@]}" --network none --shm-size=2g -e OMP_NUM_THREADS=2 \
+            -e INTDIM_TEST_VLLM=1 \
+            "$local_image" python -m pytest tests/test_intdim_zero_mask_equivalence.py -q -s
           {
             echo '### Unified environment'
             echo '```text'

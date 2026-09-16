@@ -45,6 +45,8 @@ initialized models make the tests independent of private weights and datasets.
 | vLLM generation | Original and half-width checkpoints for seven fixture configurations | Stock upstream model classes generate two valid tokens on GPU |
 | Four new model targets | Qwen3.5 35B/122B widths, GPT-OSS and Gemma 4; FP32 and BF16 | Gradient scoring, 50% selection, exact kept weights, full-model zero-mask equivalence, stock HF save/reload |
 | Gradient-pruned vLLM generation | The four new targets, BF16 | Original and gradient-selected half-width checkpoints both generate with stock vLLM |
+| Independent zero-mask reference ports | GPT-OSS and Gemma 4, FP32/BF16 | Independently computed scores and drop IDs agree with autodetect; exact kept tensors; masked/structural logits agree |
+| Zero-mask vs structural vLLM | GPT-OSS and Gemma 4, BF16 | Both stock checkpoints generate the same two tokens |
 
 The vLLM fixtures cover Qwen2-MoE, Qwen3-MoE, OLMoE, both Qwen3.5 target
 widths (512 -> 256 and 1024 -> 512), GPT-OSS (2880 -> 1440), and Gemma 4
@@ -57,9 +59,9 @@ FP32 and BF16, with the same two-layer, hidden-size-128, four-expert, top-2
 configurations as the vLLM fixtures. It scores two fixed six-token sequences
 with `mean(abs(gradient))` and removes 50% per expert. Both Qwen3.5 widths are
 compared against the unchanged released scoring and structural functions;
-scores, indices, all parameters and logits must match exactly. GPT-OSS and
-Gemma 4 have no legacy functions: their functional oracle is the original model
-with dropped down-projection columns zeroed, not a claimed old/new comparison.
+scores, indices, all parameters and logits must match exactly. The four-target
+smoke also compares against down-column masking with the same selected IDs.
+The independent GPT-OSS/Gemma 4 old-method comparisons are described below.
 Masked/structural logits allow FP32 `rtol=1e-5, atol=1e-5` and BF16
 `rtol=0.02, atol=0.002`; kept weights and saved/reloaded weights/logits must
 match bitwise. GPT-OSS includes nonzero expert biases. Tests use text inputs;
@@ -67,6 +69,49 @@ Gemma 4's fixture disables per-layer input embeddings. Setting
 `INTDIM_TEST_VLLM=1` additionally generates from the original and the actual
 gradient-pruned BF16 checkpoints (eight generations). The release gate enables
 this check.
+
+### Independent GPT-OSS and Gemma 4 zero-mask references
+
+`pruning/neuron_drop_gpt_oss.py` and `pruning/neuron_drop_gemma4.py` are new,
+model-specific ports of the released per-expert gradient/zero-mask method,
+not previously released implementations for those two models. They use fixed
+HF module paths and tensor axes and reuse the unchanged released bottom-k
+selector from `neuron_drop_qwen15_moe.py`. Neither imports or calls autodetect,
+generic scoring, handles, or generic selection. Scoring sums absolute gradients
+of gate/up/down weights over hidden dimensions, divides by `3 * hidden_size`,
+and averages the calibration samples, as in the original method.
+
+The GPT-OSS port explicitly handles interleaved gate/up columns, zeroes both
+gate/up weights and their biases, zeroes down-projection rows, and preserves
+the down/output bias. The Gemma 4 port handles concatenated gate/up rows and
+down-projection columns while preserving the dense MLP and router. Both retain
+the original parameter shapes and config widths. These callable Python APIs
+support stock floating-point text models, not packed MXFP4 or multimodal wrappers.
+
+`tests/test_intdim_zero_mask_equivalence.py` runs the reference first while
+temporarily making autodetect APIs raise on any call. The reference computes
+its own scores and drop IDs; it receives no selection from the automatic path.
+The test then independently runs autodetect and compares scores (`rtol=1e-6,
+atol=0` allows FP32 CPU/GPU reduction rounding), exact selected IDs and kept
+weights/biases. It audits all zero-masked tensors and unchanged parameters,
+compares logits on two calibration sequences plus one held-out token sequence,
+and verifies exact tensor/logit recovery from both stock HF checkpoints.
+Masked/structural logit tolerances are the same as the four-target tests above.
+With `INTDIM_TEST_VLLM=1`, the zero-mask and structural BF16 checkpoints must
+also generate identical tokens with stock vLLM (four generations in total).
+The release gate runs these tests on GPU.
+
+For example, given a stock GPT-OSS model on CUDA and calibration token batches:
+
+```python
+from less_is_moe.pruning import neuron_drop_gpt_oss as reference
+# For a Gemma4ForCausalLM text model, import neuron_drop_gemma4 instead.
+layers = list(range(model.config.num_hidden_layers))
+scores = reference.collect_neuron_gradient_scores(model, batches, layers)
+dropped = reference.decide_neurons_to_drop(scores, drop_ratio=0.5)
+reference.zero_dropped_neurons(model, dropped, layers)
+model.save_pretrained(zero_mask_directory)  # original shapes/config retained
+```
 
 The old Qwen2/Qwen3/OLMoE functions require per-expert Linear modules. Tests
 reconstruct that storage from identical native HF weights and call the actual,
@@ -119,6 +164,11 @@ docker run --rm --gpus 'device=0' --network none --shm-size=2g -e OMP_NUM_THREAD
 docker run --rm --gpus 'device=0' --network none --shm-size=2g -e OMP_NUM_THREADS=2 \
   -e INTDIM_TEST_VLLM=1 less-is-moe:dev-unified \
   python -m pytest tests/test_intdim_new_models.py -q -s
+
+# Independent old-method ports vs autodetect; FP32/BF16 HF and BF16 vLLM.
+docker run --rm --gpus 'device=0' --network none --shm-size=2g -e OMP_NUM_THREADS=2 \
+  -e INTDIM_TEST_VLLM=1 less-is-moe:dev-unified \
+  python -m pytest tests/test_intdim_zero_mask_equivalence.py -q -s
 ```
 
 Expose only the GPU allocated to your job. On a Docker host configured for
