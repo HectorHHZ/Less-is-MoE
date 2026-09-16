@@ -9,6 +9,7 @@ on:
       - 'environments/unified/**'
       - 'tests/**'
       - 'src/less_is_moe/intdim/**'
+      - 'src/less_is_moe/calibration.py'
       - 'src/less_is_moe/pruning/neuron_drop_gpt_oss.py'
       - 'src/less_is_moe/pruning/neuron_drop_gemma4.py'
       - 'src/less_is_moe/model_patches/vllm_plugin.py'

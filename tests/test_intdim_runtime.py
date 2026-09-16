@@ -118,3 +118,57 @@ def test_probe_failure_preserves_live_weights(runtime, monkeypatch):
         module.probe_fused_layout(handle)
     for key, value in before.items():
         assert torch.equal(handle.experts.state_dict()[key], value)
+
+
+@pytest.mark.parametrize("family", ("gpt_oss", "gemma4"))
+def test_probe_survives_dead_experts_and_units(family, runtime):
+    model, _ = _model(family, runtime)
+    handles = discover(model)
+    expected = [h.fused for h in handles]
+    with torch.no_grad():
+        for h in handles:
+            for expert in range(h.num_experts):
+                gate, up, down = h.expert_weights(expert)
+                ids = torch.arange(h.intermediate_size if expert == 0 else h.intermediate_size // 2,
+                                   device=gate.device)
+                gate[ids] = 0
+                up[ids] = 0
+                down[:, ids] = 0
+                if h.gate_up_bias is not None:
+                    h.gate_up_bias[expert, h.gate_up_indices(ids)] = 0
+    before = {k: v.detach().clone() for k, v in model.state_dict().items()}
+    assert [h.fused for h in discover(model)] == expected
+    for key, value in before.items():
+        assert torch.equal(model.state_dict()[key], value)
+
+
+def test_scoring_rejects_empty_calibration(runtime):
+    from less_is_moe.intdim import prune as P
+    model, _ = _model("qwen3_5_moe", runtime)
+    before = {k: v.detach().clone() for k, v in model.state_dict().items()}
+    args = P.build_parser().parse_args(["--model_name_or_path", "unused", "--output_dir", "unused",
+                                       "--mode", "structural", "--drop_ratio", "0.5"])
+    with pytest.raises(ValueError, match="Calibration batches must not be empty"):
+        P.prune(model, args, [])
+    with pytest.raises(ValueError, match="Calibration batches must not be empty"):
+        P.collect_neuron_gradient_scores(model, discover(model), [])
+    for key, value in before.items():
+        assert torch.equal(model.state_dict()[key], value)
+
+
+def test_scoring_ignores_stale_gradients(runtime):
+    from less_is_moe.intdim import prune as P
+    model, _ = _model("qwen3_5_moe", runtime)
+    clean = copy.deepcopy(model)
+    for parameter in model.parameters():
+        parameter.grad = torch.ones_like(parameter)
+    batches = [torch.tensor([[1, 3, 5, 7]], device=runtime[0])]
+    torch.manual_seed(123)
+    expected = P.collect_neuron_gradient_scores(clean, discover(clean), batches)
+    torch.manual_seed(123)
+    actual = P.collect_neuron_gradient_scores(model, discover(model), batches)
+    for layer in expected:
+        for expert in expected[layer]:
+            assert torch.equal(actual[layer][expert], expected[layer][expert])
+    assert not model.training
+    assert all(p.grad is None and not p.requires_grad for p in model.parameters())

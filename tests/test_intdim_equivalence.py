@@ -21,6 +21,7 @@ from docker.intdim_vllm_smoke import make_config
 from test_intdim import _build
 from test_intdim_runtime import eager_model
 from less_is_moe.intdim import discover, verify_checkpoint
+from less_is_moe.intdim import prune as pruning
 from less_is_moe.intdim.scoring import collect_scores, select_expert_units
 
 LEGACY = {
@@ -259,6 +260,8 @@ def _forbid_autodetect(monkeypatch):
         guard.setattr(discovery, "discover", forbidden)
         for name in ("discover", "collect_scores", "select_expert_units"):
             guard.setattr(scoring, name, forbidden)
+        for name in ("discover", "collect_neuron_gradient_scores", "pick_neurons_to_drop", "zero_dropped_neurons", "prune"):
+            guard.setattr(pruning, name, forbidden)
         for name in ("expert_weights", "apply_units", "select_units"):
             guard.setattr(discovery.MoeLayerHandle, name, forbidden)
         yield
@@ -283,6 +286,17 @@ def _vllm_tokens(checkpoint):
     records = [json.loads(line) for line in result.stdout.splitlines() if line.startswith('{"checkpoint":')]
     assert len(records) == 1 and records[0]["stock_vllm"]
     return records[0]["tokens"]
+
+
+def _prune_args(mode="structural", scope="expert", from_zeroed=False):
+    argv = ["--model_name_or_path", "gpu-fixture", "--output_dir", "unused",
+            "--mode", mode, "--prune_mode", scope, "--drop_ratio", "0.5",
+            "--n_samples", "2", "--seq_len", "6"]
+    if from_zeroed:
+        argv.append("--from_zeroed_model")
+    args = pruning.build_parser().parse_args(argv)
+    pruning.validate_args(args)
+    return args
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case.family)
@@ -328,13 +342,36 @@ def test_uniform_intdim_e(case, runtime, tmp_path, monkeypatch):
     handles = discover(automatic)
     _assert_state_equal(automatic, _reference_layout(copy.deepcopy(base), case))
     torch.manual_seed(123)
-    automatic_scores = collect_scores(automatic, calib, handles)
+    automatic_scores = pruning.collect_neuron_gradient_scores(automatic, handles, calib)
     for name, value in automatic.state_dict().items():
         assert torch.equal(value, original_state[name]), (case.family, name, "scoring modified weights")
-    automatic_keep = select_expert_units(automatic_scores, 0.5)
+    automatic_plan = pruning.pick_neurons_to_drop(automatic_scores, 0.5, "expert")
+    assert automatic_plan == dropped
+    # All scopes use an independent legacy selector and mask audit. Exercise
+    # the real public pipeline, including its own scoring, rather than a mock.
+    selector = importlib.import_module("less_is_moe.pruning.neuron_drop_qwen15_moe")
+    for scope in pruning.PRUNE_MODES:
+        with _forbid_autodetect(monkeypatch):
+            expected_plan = selector.pick_neurons_to_drop(reference_scores, 0.5, scope)
+        assert pruning.pick_neurons_to_drop(automatic_scores, 0.5, scope) == expected_plan
+        masked = _reference_layout(copy.deepcopy(base), case)
+        wanted = copy.deepcopy(masked)
+        _manual_mask(wanted, case, expected_plan)
+        torch.manual_seed(123)
+        mask_summary = pruning.prune(masked, _prune_args("mask", scope), calib)
+        _assert_state_equal(masked, wanted)
+        assert masked.config.to_dict() == original_config
+        assert mask_summary["total_dropped"] == sum(len(ids) for experts in expected_plan.values() for ids in experts.values())
+        assert torch.equal(_logits(masked, evaluation), _logits(wanted.eval(), evaluation))
+        del masked, wanted
+
+    torch.manual_seed(123)
+    structural_summary = pruning.prune(automatic, _prune_args(), calib)
+    assert structural_summary["new_d_ffn"] == case.width // 2
+    handles = discover(automatic)
     score_max_abs, scores_bitwise = 0.0, True
     for h in handles:
-        assert (h.num_experts, h.hidden_size, h.intermediate_size) == (4, 128, case.width)
+        assert (h.num_experts, h.hidden_size, h.intermediate_size) == (4, 128, case.width // 2)
         selected = {}
         for e in range(h.num_experts):
             actual, expected = automatic_scores[h.layer_index][e], reference_scores[h.layer_index][e]
@@ -348,9 +385,7 @@ def test_uniform_intdim_e(case, runtime, tmp_path, monkeypatch):
             ids = dropped[h.layer_index][e]
             assert len(ids) == case.width // 2
             selected[e] = torch.tensor([j for j in range(case.width) if j not in ids], device=device)
-            assert torch.equal(automatic_keep[h.layer_index][e].to(device), selected[e])
         assert sum(score.sum().item() for score in automatic_scores[h.layer_index].values()) > 0
-        h.apply_units(automatic_keep[h.layer_index].flip(-1))
         experts = _case_experts(reference, case, h.layer_index)
         for e, ids in selected.items():
             gate, up, down = _fixed_tensors(experts, case, e)
@@ -360,7 +395,11 @@ def test_uniform_intdim_e(case, runtime, tmp_path, monkeypatch):
                 bias_ids = torch.stack((2 * ids, 2 * ids + 1), dim=-1).flatten()
                 assert torch.equal(h.gate_up_bias[e], experts.gate_up_proj_bias[e, bias_ids])
                 assert torch.equal(h.down_bias[e], experts.down_proj_bias[e])
-    handles[0].intermediate_size_key.set(automatic.config, case.width // 2)
+    from_mask = copy.deepcopy(reference)
+    from_mask_summary = pruning.prune(from_mask, _prune_args(from_zeroed=True), None)
+    assert from_mask_summary["new_d_ffn"] == case.width // 2
+    _assert_state_equal(from_mask, automatic)
+    assert from_mask.config.to_dict() == automatic.config.to_dict()
     prefixes = tuple(h.name + "." for h in handles)
     for name, value in automatic.state_dict().items():
         if not name.startswith(prefixes):
@@ -370,7 +409,8 @@ def test_uniform_intdim_e(case, runtime, tmp_path, monkeypatch):
     if old_compact is not None:
         _assert_state_equal(automatic, old_compact)
         assert torch.equal(automatic_logits, _logits(old_compact, evaluation))
-    metrics = {"suite": "uniform", "family": case.family, "dtype": str(dtype),
+    metrics = {"suite": "uniform", "implementation": "intdim.prune (PR #26)",
+               "mask_scopes": list(pruning.PRUNE_MODES), "from_zeroed_equal": True, "family": case.family, "dtype": str(dtype),
                "reference_kind": "ported" if case.ported_reference else "released",
                "score_max_abs": score_max_abs, "scores_bitwise": scores_bitwise,
                "indices_and_kept_tensors_equal": True,
@@ -399,3 +439,54 @@ def test_uniform_intdim_e(case, runtime, tmp_path, monkeypatch):
         assert zero_tokens == structural_tokens, (zero_tokens, structural_tokens)
         metrics["stock_vllm_mask_structural_tokens_equal"] = zero_tokens
     print(json.dumps(metrics), flush=True)
+
+
+@pytest.mark.parametrize("case", CASES, ids=lambda case: case.family)
+def test_uniform_prune_cli(case, runtime, tmp_path, monkeypatch):
+    """Actual CLI loaders, calibration, save and verify on all seven GPU models."""
+    from tokenizers import Tokenizer, models, pre_tokenizers
+
+    device, dtype = runtime
+    torch.manual_seed(0)
+    model = hf.AutoModelForCausalLM.from_config(make_config(case.family), dtype=dtype).to(device).eval()
+    eager_model(model)
+    source = tmp_path / "base"
+    model.save_pretrained(source)
+    del model
+    backend = Tokenizer(models.WordLevel({f"t{i}": i for i in range(256)}, unk_token="t0"))
+    backend.pre_tokenizer = pre_tokenizers.Whitespace()
+    hf.PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="t0").save_pretrained(source)
+    calib = tmp_path / "calib.jsonl"
+    calib.write_text('\n'.join(json.dumps({"text": text}) for text in
+                               ("t1 t3 t5 t7 t9 t11", "t2 t4 t6 t8 t10 t12")))
+    dtype_arg = "fp32" if dtype == torch.float32 else "bf16"
+    original_load = pruning.load_model
+
+    def gpu_load(path, dtype):
+        loaded = original_load(path, dtype)
+        assert all(p.is_cuda for p in loaded.parameters()), "CLI must load all model parameters on GPU"
+        return eager_model(loaded)
+
+    monkeypatch.setattr(pruning, "load_model", gpu_load)
+    common = ["--dtype", dtype_arg, "--n_samples", "2", "--seq_len", "6", "--calib_data", str(calib)]
+    for mode in ("mask", "structural"):
+        torch.manual_seed(123)
+        assert pruning.main(["--model_name_or_path", str(source), "--output_dir", str(tmp_path / mode),
+                             "--mode", mode, "--drop_ratio", "0.5", *common]) == 0
+    assert pruning.main(["--model_name_or_path", str(tmp_path / "mask"),
+                         "--output_dir", str(tmp_path / "from_zeroed"), "--mode", "structural",
+                         "--from_zeroed_model", "--dtype", dtype_arg]) == 0
+    loaded = {}
+    tokens = torch.tensor([[13, 15, 17, 19]], device=device)
+    for name in ("mask", "structural", "from_zeroed"):
+        loaded[name] = gpu_load(tmp_path / name, dtype)
+        assert verify_checkpoint(tmp_path / name).ok
+        if name != "mask":
+            summary = json.loads((tmp_path / name / pruning.STRUCTURAL_SUMMARY_FILE).read_text())
+            assert summary["stock_load_verified"] is True
+            assert summary["new_d_ffn"] == case.width // 2
+    _assert_state_equal(loaded["from_zeroed"], loaded["structural"])
+    _assert_logits_close(_logits(loaded["structural"], [tokens]), _logits(loaded["mask"], [tokens]), dtype)
+    assert torch.equal(_logits(loaded["from_zeroed"], [tokens]), _logits(loaded["structural"], [tokens]))
+    print(json.dumps({"suite": "prune_cli", "family": case.family, "dtype": str(dtype),
+                      "mask_structural_from_zeroed": True, "all_model_parameters_cuda": True}), flush=True)

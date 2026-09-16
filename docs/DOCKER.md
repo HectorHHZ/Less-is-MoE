@@ -1,7 +1,7 @@
 # Unified GPU runtime and IntDim-E validation
 
 The unified image builds on the generic `intdim` implementation introduced in
-PR #24. Its GPU checks establish two things: the new IntDim-E path preserves
+PR #24 and the unified pruning pipeline from PR #26. Its GPU checks establish two things: the new IntDim-E path preserves
 the released algorithm, and structurally pruned checkpoints can use stock HF
 and vLLM implementations in this fixed environment.
 
@@ -61,8 +61,11 @@ Every row checks:
    made to raise while the reference runs, before automatic scores/IDs exist.
 2. Reference zero-masking, with unchanged config/shapes and an audit of every
    masked and untouched tensor.
-3. Autodetect scoring, exact kept IDs and weights/biases, and structural pruning
-   with descending input IDs to exercise index canonicalization.
+3. The actual `intdim.prune` scoring and selection APIs, followed by its public
+   pipeline for E/L/G zero-masking and E structural pruning. All three mask
+   plans, tensors and logits match independent legacy selection/manual masks.
+   Kept IDs and weights/biases are exact; `--from_zeroed_model` produces the
+   same structural tensors as direct pruning.
 4. Full-model masked/structural logits. For the five cases with released
    structural functions, their weights and logits must also match the generic
    structural path exactly.
@@ -118,10 +121,19 @@ Native-layout score tolerances are FP32 `rtol=1e-5, atol=1e-8` and BF16
 `rtol=0.02, atol=1e-8`; logits use FP32 `rtol=1e-5, atol=1e-6` and BF16
 `rtol=0.02, atol=0.002`. Selected IDs and kept weights remain exact.
 
-`tests/test_intdim_runtime.py` keeps **14 structural/probe regressions** separate
-from method equivalence: six families in FP32/BF16 plus two probe-failure cases.
-This preserves tiny/square layout cases, random unsorted masks and exception
-safety. The two files together contain **42 GPU cases**. The previous separate
+`test_uniform_prune_cli` adds **14 GPU CLI cases** in the same equivalence
+file: seven configurations in FP32/BF16. Each executes actual tokenizer/file
+calibration, stock model loading, direct structural pruning, zero-masking,
+mask-to-structural conversion, save and verification. All loaded parameters
+must be on CUDA; expert execution is explicitly set to stock eager, matching
+the other HF tests. Reloaded direct/converted structural weights are exact,
+and their logits match the masked checkpoint.
+
+`tests/test_intdim_runtime.py` keeps **22 structural/probe/scoring regressions**
+separate from method equivalence: six families in FP32/BF16, probe-failure
+preservation, dead-expert/unit discovery, empty calibration rejection and stale
+gradient isolation. This preserves tiny/square layout cases, random unsorted
+masks and exception safety. The two files together contain **64 GPU cases**. The previous separate
 new-model and zero-mask equivalence files are consolidated into the common
 matrix; their coverage is retained or strengthened.
 
@@ -187,9 +199,21 @@ reproduction workflows. Their original environment defaults are preserved;
 this change retires them from the **unified IntDim-E path**, not from every
 baseline. It does not delete or silently upgrade old reproduction environments.
 
-`intdim.scoring.collect_scores` preserves the released mean-absolute-gradient
-criterion, and `select_expert_units` preserves its bottom-k selection. A Python
-workflow is:
+Use the unified CLI from PR #26:
+
+```bash
+python -m less_is_moe.intdim.prune \
+  --model_name_or_path /models/MODEL --output_dir /outputs/structural \
+  --mode structural --drop_ratio 0.5 --dtype bf16 --calib_data /data/calib.jsonl
+```
+
+`--mode mask --prune_mode expert|layer|global` supports E/L/G zero-masking.
+`--mode structural --from_zeroed_model` compacts a uniformly zero-masked
+checkpoint without calibration. Empty calibration for scoring is rejected.
+
+`intdim.scoring.collect_scores` and `select_expert_units` are compatibility
+helpers that delegate to `intdim.prune`; no separate scoring algorithm is
+maintained. The existing Python workflow remains valid:
 
 ```python
 from less_is_moe.intdim import discover, verify_checkpoint
@@ -208,9 +232,11 @@ model.save_pretrained(output_directory)
 assert verify_checkpoint(output_directory).ok
 ```
 
-The complete calibration/CLI migration remains tracked by #25. This PR adds
-the scoring API needed to verify equivalence, not a replacement for every
-historical launcher or calibration option.
+The unified calibration and CLI implementation is included from PR #26.
+Historical launcher retirement and full pretrained-checkpoint experiments
+remain tracked by #25. See [the upstream review](PR24_PR26_REVIEW.md) for the
+original-revision failures and integration fixes; these GPU results apply to
+#27's integrated code, not unmodified #24/#26.
 
 ## Mount data and update dependencies
 
