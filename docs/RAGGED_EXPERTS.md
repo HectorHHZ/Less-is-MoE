@@ -111,6 +111,10 @@ uses the entire checkpoint, four short calibration examples and two held-out
 prompts; there is no layer, expert or hidden-size reduction before pruning.
 These examples establish pipeline feasibility, not model quality.
 
+Run HF preparation and vLLM initialization **serially** on a dedicated GPU.
+vLLM profiles available memory at startup; another process allocating model
+weights during that interval can invalidate its KV-cache memory estimate.
+
 The harness stores zero-mask and compact checkpoints, exact HF reload checks,
 logit errors, widths, parameter counts, memory, environment, and vLLM output
 tokens. Prepare and generate run in separate processes. Compare stock vLLM

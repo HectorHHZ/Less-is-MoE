@@ -66,9 +66,10 @@ def prepare(args):
         if args.scores:
             torch.save(dict(model=args.model, calibration=CALIBRATION, scores=scores), args.scores)
     plan = P.pick_neurons_to_drop(scores, 0.5, args.scope)
+    calibration_lengths = [batch.shape[-1] for batch in calibration]
     P.zero_dropped_neurons(handles, plan)
     masked = args.output / "masked"
-    model.save_pretrained(masked)
+    model.save_pretrained(masked, max_shard_size="4GB")
     if tokenizer is not None:
         tokenizer.save_pretrained(masked)
     inputs = [torch.tensor([prompt], device="cuda") for prompt in prompts]
@@ -103,6 +104,7 @@ def prepare(args):
                    hf_logits_max_abs=error, hf_argmax_equal=all(torch.equal(a.argmax(-1), b.argmax(-1)) for a, b in zip(actual, expected)),
                    reload_weights_exact=True, reload_logits_exact=True,
                    calibration_samples=len(CALIBRATION) if args.model != "tiny" else 2,
+                   calibration_token_lengths=calibration_lengths,
                    prompt_token_ids=prompts, torch=torch.__version__, transformers=transformers.__version__,
                    gpu=torch.cuda.get_device_name(), dtype="bfloat16",
                    peak_allocated_bytes=torch.cuda.max_memory_allocated(), elapsed_seconds=time.time() - started)

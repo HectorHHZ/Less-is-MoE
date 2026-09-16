@@ -407,7 +407,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Use only the content of chat-message dict fields in HF datasets (Qwen3/Qwen3.5 script behavior). "
                              "The Qwen1.5-MoE and OLMoE scripts correspond to --no-unwrap_message_content.")
     parser.add_argument("--dtype", choices=("bf16", "fp16", "fp32"), default="bf16")
-    parser.add_argument("--skip_verify", action="store_true", help="Structural mode: skip the stock-loader verification")
+    parser.add_argument("--skip_verify", action="store_true", help="Skip checkpoint reload verification (stock for structural, custom GPU loader for ragged)")
     return parser
 
 
@@ -539,6 +539,21 @@ def main(argv: list[str] | None = None) -> int:
         summary["stock_load_verified"] = report.ok
         if not report.ok:
             raise RuntimeError(f"Pruned checkpoint does not load with stock classes:\n{report}")
+
+    if args.mode == "ragged" and not args.skip_verify:
+        import gc
+        from .ragged import load_checkpoint
+        # Release the pruning model before verifying a full-size GPU reload.
+        del model
+        gc.collect()
+        torch.cuda.empty_cache()
+        restored = load_checkpoint(args.output_dir, dtype=dtype)
+        with torch.inference_mode():
+            token = restored.config.bos_token_id or 0
+            output = restored(torch.tensor([[token, token]], device="cuda"), use_cache=False).logits
+            if not torch.isfinite(output).all():
+                raise RuntimeError("Ragged checkpoint reload produced non-finite logits")
+        summary["ragged_load_verified"] = True
 
     summary_file = MASK_SUMMARY_FILE if args.mode == "mask" else STRUCTURAL_SUMMARY_FILE
     with open(os.path.join(args.output_dir, summary_file), "w") as f:

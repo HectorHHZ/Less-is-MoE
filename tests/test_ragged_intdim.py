@@ -1,6 +1,7 @@
 """GPU-only non-uniform checkpoint and kernel regressions."""
 
 import copy
+import json
 
 import pytest
 import torch
@@ -84,3 +85,32 @@ def test_invalid_export_preserves_model(model):
         compact_model(model, handles, plan)
     assert not hasattr(model.config, "less_is_moe")
     assert all(torch.equal(v, model.state_dict()[k]) for k, v in before.items())
+
+
+@pytest.mark.parametrize("scope", ["layer", "global"])
+def test_ragged_cli(model, scope, tmp_path):
+    from test_intdim_prune import _save_tokenizer
+    base = tmp_path / "base"
+    model.save_pretrained(base)
+    _save_tokenizer(base)
+    calib = tmp_path / "calib.jsonl"
+    calib.write_text(json.dumps({"text": "t1 t3 t5 t7 t9 t11"}) + "\n")
+    out = tmp_path / "compact"
+    assert P.main(["--model_name_or_path", str(base), "--output_dir", str(out),
+                   "--mode", "ragged", "--prune_mode", scope, "--drop_ratio", "0.5",
+                   "--calib_data", str(calib), "--n_samples", "1", "--seq_len", "6", "--dtype", "bf16"]) == 0
+    summary = json.loads((out / P.STRUCTURAL_SUMMARY_FILE).read_text())
+    assert summary["ragged_load_verified"] is True
+    assert summary["prune_mode"] == scope
+
+
+def test_zero_layer_roundtrip(model, tmp_path):
+    handles = discover(model)
+    plan = {h.layer_index: {e: list(range(h.intermediate_size)) if h.layer_index == 0 else [0, 3, 9]
+                            for e in range(h.num_experts)} for h in handles}
+    compact_model(model, handles, plan)
+    save_checkpoint(model, tmp_path)
+    restored = load_checkpoint(tmp_path)
+    tokens = torch.tensor([[1, 3, 5]], device="cuda")
+    with torch.inference_mode():
+        torch.testing.assert_close(restored(tokens).logits, model(tokens).logits, rtol=0, atol=0)

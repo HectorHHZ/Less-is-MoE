@@ -123,7 +123,9 @@ def compact_model(model, handles, drop_plan):
 
 def save_checkpoint(model, directory, tokenizer=None):
     validate_metadata(model.config)
-    model.save_pretrained(directory)
+    # HF 5 normally reverses its fused-expert conversion when saving Qwen.
+    # This checkpoint deliberately stores our flat parameters as they are.
+    model.save_pretrained(directory, save_original_format=False, max_shard_size="4GB")
     # save_pretrained uses the live Python class, which may still be the stock
     # class immediately after in-place compaction. Explicitly mark the format.
     model.config.architectures = [ARCHITECTURE]
