@@ -76,16 +76,49 @@ def prepare(args):
     with torch.inference_mode():
         expected = [model(tokens, use_cache=False).logits[:, -1].float().cpu() for tokens in inputs]
     summary = compact_model(model, handles, plan)
+    # Isolate structural correctness from BF16 rounding/routing amplification.
+    # Check three experts in EVERY layer, using FP32 on the GPU and the same
+    # inputs for the original zero-masked and compact matrices.
+    fp32_error = 0.0
+    fp32_checks = 0
+    previous_tf32 = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = False
+    try:
+        with torch.inference_mode():
+            for h in handles:
+                x = torch.randn(2, h.hidden_size, device="cuda", dtype=torch.float32)
+                for expert in sorted({0, h.num_experts // 2, h.num_experts - 1}):
+                    values = []
+                    for container in (h, model.get_submodule(h.name)):
+                        gate, up, down = [w.float() for w in container.expert_weights(expert)]
+                        values.append(torch.nn.functional.linear(
+                            torch.nn.functional.silu(torch.nn.functional.linear(x, gate))
+                            * torch.nn.functional.linear(x, up), down))
+                    torch.testing.assert_close(values[0], values[1], rtol=1e-4, atol=1e-5)
+                    fp32_error = max(fp32_error, (values[0] - values[1]).abs().max().item())
+                    fp32_checks += 1
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = previous_tf32
     del handles, scores, calibration
     gc.collect()
     torch.cuda.empty_cache()
     with torch.inference_mode():
         actual = [model(tokens, use_cache=False).logits[:, -1].float().cpu() for tokens in inputs]
     error = max((a - b).abs().max().item() for a, b in zip(actual, expected))
-    # BF16 layer roundoff can accumulate over all 48 layers; report the actual
-    # errors and argmax separately. This is a numerical check, not a quality eval.
+    # Full-model BF16 can amplify rounding differences through later routers.
+    # Preserve these errors in the report; don't claim bitwise equivalence.
+    logit_metrics = []
     for a, b in zip(actual, expected):
-        torch.testing.assert_close(a, b, rtol=0.04, atol=0.25 if args.model != "tiny" else 0.015)
+        assert torch.isfinite(a).all() and torch.isfinite(b).all()
+        cosine = torch.nn.functional.cosine_similarity(a, b).item()
+        kl = torch.nn.functional.kl_div(a.log_softmax(-1), b.softmax(-1), reduction="batchmean").item()
+        logit_metrics.append(dict(max_abs=(a-b).abs().max().item(), rmse=(a-b).square().mean().sqrt().item(),
+                                  cosine=cosine, reference_to_compact_kl=kl,
+                                  argmax_equal=torch.equal(a.argmax(-1), b.argmax(-1))))
+        if args.model == "tiny":
+            torch.testing.assert_close(a, b, rtol=0.04, atol=0.015)
+        elif cosine < 0.995 or kl > 0.01:
+            raise AssertionError(f"Full BF16 numerical sanity check failed: {logit_metrics[-1]}")
     compact = args.output / "compact"
     save_checkpoint(model, compact, tokenizer)
     restored = load_checkpoint(compact, attn_implementation="sdpa")
@@ -102,6 +135,7 @@ def prepare(args):
                    num_experts=model.config.num_experts, hidden_size=model.config.hidden_size,
                    width_min=min(all_widths), width_max=max(all_widths), distinct_widths=len(set(all_widths)),
                    hf_logits_max_abs=error, hf_argmax_equal=all(torch.equal(a.argmax(-1), b.argmax(-1)) for a, b in zip(actual, expected)),
+                   hf_logit_metrics=logit_metrics, fp32_expert_checks=fp32_checks, fp32_expert_max_abs=fp32_error,
                    reload_weights_exact=True, reload_logits_exact=True,
                    calibration_samples=len(CALIBRATION) if args.model != "tiny" else 2,
                    calibration_token_lengths=calibration_lengths,

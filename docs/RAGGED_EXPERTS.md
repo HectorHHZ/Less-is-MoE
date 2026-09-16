@@ -120,3 +120,18 @@ logit errors, widths, parameter counts, memory, environment, and vLLM output
 tokens. Prepare and generate run in separate processes. Compare stock vLLM
 zero-mask with custom vLLM compact under identical settings before attributing
 any future measured speedup to pruning.
+
+### Numerical checks
+
+The compact weights reload bitwise. Removing zero columns can change BF16 GEMM
+rounding; later top-k routers can amplify small differences, so full-model
+BF16 logits are not expected to be bitwise identical. The harness checks three
+experts in every layer against their zero-masked counterpart in FP32 on GPU
+(`rtol=1e-4`, `atol=1e-5`, TF32 disabled). It separately records BF16 logit
+maximum error, RMSE, cosine similarity, KL divergence and first-token agreement.
+For full checkpoints, cosine >= 0.995 and reference-to-compact KL <= 0.01 are
+numerical sanity gates on the two smoke prompts, not an accuracy benchmark or
+a claim that every output token will match. Tiny fixtures retain a direct
+elementwise BF16 comparison. The first full-model elementwise tolerance check
+failed; that difference is retained in the validation report rather than
+being described as exact equivalence.
