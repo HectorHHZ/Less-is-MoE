@@ -156,11 +156,16 @@ them before shared-expert addition or downstream normalization. GPT-OSS gate/up
 biases follow the neuron slices; rank zero alone contributes the down bias,
 including for an empty expert. Upstream vLLM handles attention, embedding,
 dense and shared-expert tensor parallelism.
+GPT-OSS attention sinks are also sliced by head in the compact weight loader,
+following its upstream loader.
 
 There is no hardcoded TP=2 or batch-size=2 limit. Larger TP must still satisfy
 the original model's attention/head and dense/shared projection divisibility
 rules. Narrower expert shards can underutilize GPU tiles, and the routed branch
-adds one all-reduce per MoE layer. Loading currently slices global checkpoint
+adds one all-reduce per MoE layer. With the pinned vLLM attention implementations,
+OLMoE and GPT-OSS specifically require TP to divide `num_key_value_heads`;
+replicating KV heads across a larger TP group is rejected early.
+Loading currently slices global checkpoint
 tensors on each rank, so startup I/O and host-memory pressure also need checking
 at larger TP. Different BF16 reduction orders can change logits and tokens.
 

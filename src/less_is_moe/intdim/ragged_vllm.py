@@ -47,6 +47,12 @@ def _validate(vllm_config):
         raise ValueError("Ragged v1 does not support quantization, LoRA or speculative decoding")
     config = mc.hf_text_config
     validate_metadata(config)
+    tp_size = pc.tensor_parallel_size
+    # These pinned upstream attention implementations assume partitioned KV
+    # heads (OLMoE gathers K for its norm; GPT-OSS divides its KV size directly).
+    if config.model_type in ("olmoe", "gpt_oss") and config.num_key_value_heads % tp_size:
+        raise ValueError(f"{config.model_type} with vLLM 0.29.0 requires TP to divide "
+                         "num_key_value_heads; replicated KV heads are unsupported")
     if getattr(config, "dual_chunk_attention_config", None):
         raise ValueError("Dual-chunk attention is not supported by ragged v1")
     return config
@@ -391,7 +397,22 @@ class RaggedGptModel(gpt.GptOssModel):
     block_cls = RaggedGptBlock
 
     def load_weights(self, weights):
-        return _load_plain_weights(self, weights)
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+        heads = self.config.num_attention_heads
+
+        def sharded():
+            for name, weight in weights:
+                # Upstream GPT-OSS slices sinks in its model weight loader,
+                # rather than attaching a loader to the attention parameter.
+                if name.endswith(".attn.sinks"):
+                    if tuple(weight.shape) != (heads,):
+                        raise ValueError("Invalid GPT-OSS attention sink shape")
+                    local_heads = heads // tp_size
+                    weight = weight.narrow(0, tp_rank * local_heads, local_heads)
+                yield name, weight
+
+        return _load_plain_weights(self, sharded())
 
 
 class RaggedGptOssForCausalLM(_RaggedCausalLM):
