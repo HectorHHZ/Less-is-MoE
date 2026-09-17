@@ -16,7 +16,7 @@ def run(args):
     import torch
     from less_is_moe.intdim import discover
     from less_is_moe.intdim import prune as P
-    from less_is_moe.intdim.ragged import load_checkpoint
+    from less_is_moe.intdim.ragged import load_checkpoint, expert_path
     from less_is_moe.intdim.ragged_hf import load_source_model
 
     assert torch.cuda.is_available(), "A GPU is required"
@@ -46,7 +46,7 @@ def run(args):
         for i, layer in enumerate(model.model.layers):
             def capture(module, values, index=i):
                 routes[index] = values[1].detach().sort(-1).values.cpu()
-            hooks.append(layer.mlp.experts.register_forward_pre_hook(capture))
+            hooks.append(model.get_submodule(expert_path(model.config, i)).register_forward_pre_hook(capture))
         try:
             with torch.inference_mode():
                 for context in contexts:
@@ -71,7 +71,8 @@ def run(args):
     del handles, cached
     if args.masked_dir:
         from transformers import AutoTokenizer
-        model.save_pretrained(args.masked_dir, max_shard_size="4GB")
+        model.save_pretrained(args.masked_dir, max_shard_size="4GB",
+                              save_original_format=model.config.model_type != "gpt_oss")
         AutoTokenizer.from_pretrained(args.model, local_files_only=True).save_pretrained(args.masked_dir)
     masked_bf16 = evaluate(model)
     model.float()
@@ -117,6 +118,8 @@ def run(args):
                   precision_control="Same BF16 weights promoted to FP32; TF32 disabled; full HF GPU models; no KV cache",
                   bf16=compare(masked_bf16, compact_bf16), fp32=compare(masked_fp32, compact_fp32),
                   torch=torch.__version__, gpu=torch.cuda.get_device_name(),
+                  visible_gpus=torch.cuda.device_count(), hf_compact_device_map=getattr(model, "hf_device_map", None),
+                  peak_allocated_bytes_per_gpu=[torch.cuda.max_memory_allocated(i) for i in range(torch.cuda.device_count())],
                   script_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                   peak_allocated_bytes=torch.cuda.max_memory_allocated(), elapsed_seconds=time.time()-started)
     (root / "precision.json").write_text(json.dumps(report, indent=2) + "\n")

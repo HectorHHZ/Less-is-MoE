@@ -14,7 +14,7 @@ The importance criterion, selection scopes, and outputs are unchanged:
   in every expert; ``layer`` (IntDim-L) pools units across the experts of a layer;
   ``global`` (IntDim-G) pools units across all layers.
 * **Apply.** ``mask`` keeps tensor shapes; ``structural`` removes equal counts
-  with stock loaders; ``ragged`` exports unequal SiLU MoE widths for our plugin.
+  with stock loaders; ``ragged`` exports unequal MoE widths for our GPU plugin.
 
 The arithmetic follows the per-family scripts operation for operation, including
 where each reduction runs, so scores and outputs match them exactly.
@@ -387,7 +387,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model_name_or_path", required=True)
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--mode", choices=("mask", "structural", "ragged"), required=True,
-                        help="mask: zero units; structural: uniform stock-loader checkpoint; ragged: compact SiLU MoE plugin checkpoint")
+                        help="mask: zero units; structural: uniform stock-loader checkpoint; ragged: compact MoE GPU plugin checkpoint")
     parser.add_argument("--prune_mode", choices=PRUNE_MODES, default="expert",
                         help="Selection scope: expert (IntDim-E), layer (IntDim-L), global (IntDim-G). Structural mode requires expert.")
     parser.add_argument("--drop_ratio", type=float, default=None, help="Fraction of units to drop, in (0, 1)")

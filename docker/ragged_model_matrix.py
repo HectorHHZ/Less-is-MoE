@@ -22,6 +22,9 @@ CASES = {
     "olmoe": ("allenai/OLMoE-1B-7B-0924", "olmoe"),
     "qwen3": ("Qwen/Qwen3-30B-A3B", "qwen3_moe"),
     "qwen35": ("Qwen/Qwen3.5-35B-A3B", "qwen3_5_moe_text"),
+    "qwen35122": ("Qwen/Qwen3.5-122B-A10B", "qwen3_5_moe_text"),
+    "gptoss": ("openai/gpt-oss-120b", "gpt_oss"),
+    "gemma4": ("google/gemma-4-26B-A4B", "gemma4_text"),
 }
 
 
@@ -36,6 +39,7 @@ def run(args):
     source_sha256 = {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sources}
     config = json.loads((args.model / "config.json").read_text())
     from transformers import AutoConfig
+    from less_is_moe.intdim.ragged import expert_count, original_width
     normalized = AutoConfig.from_pretrained(args.model).get_text_config()
     expected_family = CASES[args.case][1]
     if normalized.model_type != expected_family:
@@ -47,7 +51,7 @@ def run(args):
                     source_weight_files=manifest, source_sha256=source_sha256,
                     source_config_sha256=hashlib.sha256((args.model / "config.json").read_bytes()).hexdigest(),
                     calibration_samples=4, calibration_max_tokens=64, drop_ratio=0.5,
-                    generated_tokens_per_prompt=args.max_tokens,
+                    generated_tokens_per_prompt=args.max_tokens, pipeline_parallel_size=args.pipeline_parallel_size,
                     scope_results=records, status="running")
     report = args.output / "matrix.json"
 
@@ -75,19 +79,20 @@ def run(args):
                 if prep["family"] != expected_family:
                     raise AssertionError("Wrong pretrained model family")
                 for key in ("num_layers", "num_experts", "hidden_size"):
-                    expected = getattr(normalized, "num_hidden_layers" if key == "num_layers" else key)
+                    expected = expert_count(normalized) if key == "num_experts" else getattr(normalized, "num_hidden_layers" if key == "num_layers" else key)
                     if prep[key] != expected:
                         raise AssertionError(f"Original model dimension changed: {key}")
-                width = normalized.intermediate_size if args.case == "olmoe" else normalized.moe_intermediate_size
-                full_count = normalized.num_hidden_layers * normalized.num_experts * width
+                width = original_width(normalized)
+                full_count = normalized.num_hidden_layers * expert_count(normalized) * width
                 widths = prep["expert_intermediate_sizes"]
                 if sum(sum(ws) for ws in widths.values()) != full_count // 2:
                     raise AssertionError("The checkpoint did not retain exactly 50% of routed intermediate units")
-                if scope == "layer" and any(sum(ws) != normalized.num_experts * width // 2 for ws in widths.values()):
+                if scope == "layer" and any(sum(ws) != expert_count(normalized) * width // 2 for ws in widths.values()):
                     raise AssertionError("IntDim-L did not preserve the per-layer 50% budget")
                 for checkpoint in ("masked", "compact"):
                     command(["generate", "--output", str(out), "--checkpoint", checkpoint,
-                             "--max-tokens", str(args.max_tokens), "--gpu-memory-utilization", str(args.gpu_memory_utilization)],
+                             "--max-tokens", str(args.max_tokens), "--gpu-memory-utilization", str(args.gpu_memory_utilization),
+                             "--pipeline-parallel-size", str(args.pipeline_parallel_size)],
                             out / f"{checkpoint}.log")
                 baseline = json.loads((out / "vllm-masked.json").read_text())
                 compact = json.loads((out / "vllm-compact.json").read_text())
@@ -126,4 +131,5 @@ if __name__ == "__main__":
     parser.add_argument("--scratch", type=Path, default=Path("/dev/shm"))
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.6)
     parser.add_argument("--max-tokens", type=int, default=128)
+    parser.add_argument("--pipeline-parallel-size", type=int, default=1)
     run(parser.parse_args())

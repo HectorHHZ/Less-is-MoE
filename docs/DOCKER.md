@@ -209,10 +209,12 @@ python -m less_is_moe.intdim.prune \
 
 `--mode mask --prune_mode expert|layer|global` supports E/L/G zero-masking.
 
-For Qwen1.5-MoE, OLMoE, Qwen3-MoE and Qwen3.5-MoE text models,
+For Qwen1.5-MoE, OLMoE, Qwen3-MoE, Qwen3.5-MoE, GPT-OSS and Gemma4 text models,
 `--mode ragged --prune_mode layer|global` adds a separate compact
 non-uniform format. Its vLLM backend requires
-`VLLM_PLUGINS=less_is_moe_ragged`, BF16, one GPU and eager execution. See
+`VLLM_PLUGINS=less_is_moe_ragged`, BF16, TP=DP=1 and eager execution. Pipeline
+parallelism can partition large models across GPUs. GPT-OSS's published MXFP4
+weights are dequantized to BF16 before pruning and before both comparisons. See
 [ragged expert support](RAGGED_EXPERTS.md); stock runtime defaults stay the same.
 `--mode structural --from_zeroed_model` compacts a uniformly zero-masked
 checkpoint without calibration. Empty calibration for scoring is rejected.

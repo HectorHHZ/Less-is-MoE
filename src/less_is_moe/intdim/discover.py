@@ -472,11 +472,10 @@ def _run_expert(experts: nn.Module, x: torch.Tensor, num_tokens: int, expert: in
 def _consistent(handle: MoeLayerHandle, layout: FusedLayout, num_tokens: int, seed: int, max_units: int = 8) -> bool:
     """Whether zeroing a unit's gate/up rows matches zeroing its down column, under ``layout``.
 
-    Only *live* units are informative: in a zero-masked checkpoint half the
-    units may already be zero, and removing a dead unit changes nothing under
-    any hypothesis. Up to ``max_units`` units whose hypothesised gate row is
-    non-zero are tested; every informative unit must agree, and at least one
-    must be informative.
+    Only *live* units are informative. Tiny nonzero pretrained weights can
+    also produce no measurable change, so rank candidate units by their
+    gate/up/down magnitudes instead of sampling nonzero rows uniformly.
+    Every informative unit must agree, and at least one must be informative.
     """
     gate_up = handle.gate_up
     inter = handle.intermediate_size
@@ -486,17 +485,26 @@ def _consistent(handle: MoeLayerHandle, layout: FusedLayout, num_tokens: int, se
             return torch.cat([unit, unit + inter])
         return torch.cat([2 * unit, 2 * unit + 1])
 
-    # Probe the expert with the most live units under this hypothesis: a zero-mask
-    # with the layer or global scope can remove every unit of some experts.
+    # Bound temporary memory to one expert. Rank in FP32 so BF16 products do
+    # not underflow. This selects probe inputs only, never pruning scores.
     gu = gate_up if layout.gate_up_unit_axis == 1 else gate_up.transpose(1, 2)  # (E, 2I, H)
     gates = gu[:, :inter] if layout.pairing == "concat" else gu[:, 0::2]
-    # Bound temporary memory to one expert, including for large E/H/I.
-    live_counts = torch.stack([gate.ne(0).any(dim=1).sum() for gate in gates])
-    expert = int(live_counts.argmax())
-    live = torch.nonzero(gates[expert].ne(0).any(dim=1), as_tuple=False).flatten().cpu()
+    ups = gu[:, inter:] if layout.pairing == "concat" else gu[:, 1::2]
+    downs = handle.down if layout.down_unit_axis == 1 else handle.down.transpose(1, 2)
+    bias = handle.gate_up_bias
+    strengths = []
+    for e in range(handle.num_experts):
+        g, u = gates[e].abs().amax(dim=1).float(), ups[e].abs().amax(dim=1).float()
+        if bias is not None:
+            gb, ub = bias[e].chunk(2) if layout.pairing == "concat" else (bias[e, ::2], bias[e, 1::2])
+            g, u = g + gb.abs().float(), u + ub.abs().float()
+        strengths.append(g * u * downs[e].abs().amax(dim=1).float())
+    strengths = torch.stack(strengths)
+    expert = int(strengths.sum(dim=1).argmax())
+    live = torch.nonzero(strengths[expert] > 0, as_tuple=False).flatten()
     if live.numel() == 0:
         return False
-    picks = live[torch.linspace(0, live.numel() - 1, min(max_units, live.numel())).round().long().unique()]
+    picks = live[strengths[expert, live].topk(min(max_units, live.numel())).indices].cpu()
 
     # Keep #27's GPU precision and exception safety, combined with #26's
     # live-unit selection. Only the chosen expert is copied, in FP32 on GPU.

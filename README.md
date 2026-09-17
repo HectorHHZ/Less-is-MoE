@@ -149,8 +149,10 @@ locks, mounts, and the planned `0.1.0-unified` GHCR release.
 For unequal IntDim-L/G expert widths, the opt-in
 [ragged GPU backend](docs/RAGGED_EXPERTS.md) adds compact checkpoint
 export, an explicit HF loader and vLLM integration on the same pinned runtime.
-It supports Qwen1.5-MoE, OLMoE, Qwen3-MoE and Qwen3.5-MoE text inference,
-using BF16, a single GPU and eager execution.
+It supports Qwen1.5-MoE, OLMoE, Qwen3-MoE, Qwen3.5-MoE, GPT-OSS and Gemma4
+text inference using BF16 and eager execution. Large checkpoints can use
+pipeline parallelism across GPUs (TP=DP=1). GPT-OSS source weights are
+explicitly dequantized from MXFP4 to BF16 for both comparison paths.
 
 ## Pruning
 
