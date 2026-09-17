@@ -541,6 +541,11 @@ def is_esft_dataset(name: str) -> bool:
 
 
 def main(args):
+    if args.dataset.lower() == "supergpqa":
+        from .supergpqa import run_evaluation
+        return run_evaluation(args)
+    if args.runtime_patch == "ragged":
+        raise ValueError("This evaluation entry point currently supports ragged checkpoints for SuperGPQA only")
     set_random_seed(args.seed)
     family = detect_model_family(args.model_name_or_path)
     supported_families = {"qwen2_moe", "qwen3_moe", "qwen3_5_moe"}
@@ -1134,6 +1139,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--max_tokens", type=int, default=512)
+    parser.add_argument("--reasoning_effort", choices=("low", "medium", "high"), default="high")
+    parser.add_argument("--prompt_date", default="2026-09-17", help="Fixed date for reproducible GPT-OSS chat prompts")
+    parser.add_argument("--limit", type=int, default=None, help="SuperGPQA smoke-test subset size")
+    parser.add_argument("--resume", action="store_true", help="Resume a matching SuperGPQA run")
+    parser.add_argument("--enforce_eager", action="store_true")
+    parser.add_argument("--max_num_batched_tokens", type=int, default=8192)
     parser.add_argument("--stop_sequences", type=str, default=None)
     parser.add_argument(
         "--prompt_mode", type=str, default="iprompt",
@@ -1163,7 +1174,7 @@ if __name__ == "__main__":
     parser.add_argument("--openai_api_key", type=str, default=None)
 
     parser.add_argument(
-        "--runtime_patch", choices=("stock", "legacy"),
+        "--runtime_patch", choices=("stock", "legacy", "ragged"),
         default=os.environ.get("LESS_IS_MOE_RUNTIME_PATCH", "legacy"),
         help="Use stock models for uniform-width IntDim-E; legacy patches preserve older expert-drop workflows.",
     )
