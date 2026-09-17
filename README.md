@@ -152,7 +152,8 @@ export, an explicit HF loader and vLLM integration on the same pinned runtime.
 It supports Qwen1.5-MoE, OLMoE, Qwen3-MoE, Qwen3.5-MoE, GPT-OSS and Gemma4
 text inference using BF16 and eager execution. Tensor parallelism splits each
 expert's retained neurons across GPUs; pipeline parallelism partitions whole
-layers (DP=1). GPT-OSS source weights are
+layers. Data-parallel serving replicates the compact model with optional TP
+inside each replica. GPT-OSS source weights are
 explicitly dequantized from MXFP4 to BF16 before pruning.
 
 ## Pruning

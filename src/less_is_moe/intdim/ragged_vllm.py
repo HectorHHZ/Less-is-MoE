@@ -1,6 +1,6 @@
 """Shared ragged expert kernels and vLLM 0.29.0 model adapters.
 
-GPU BF16, tensor/layer pipeline parallelism, DP=1, eager. Upstream attention,
+GPU BF16, tensor/layer pipeline parallelism, replica data parallelism, eager. Upstream attention,
 decoder/model forwards, weight mappings and hybrid-cache methods are reused
 without global patches.
 No stock FusedMoE or rectangular routed-expert weights are instantiated.
@@ -37,8 +37,9 @@ def _validate(vllm_config):
     if vllm.__version__ != "0.29.0":
         raise ValueError("Ragged v1 is pinned to vLLM 0.29.0")
     pc, mc = vllm_config.parallel_config, vllm_config.model_config
-    if getattr(pc, "data_parallel_size", 1) != 1:
-        raise ValueError("Ragged requires DP=1")
+    # Native vLLM DP engines each own a complete compact model, optionally
+    # sharded within their TP group. No expert weights or activations are
+    # distributed across DP replicas; vLLM owns request/wave coordination.
     if pc.enable_expert_parallel or pc.enable_eplb or getattr(pc, "use_sequence_parallel_moe", False):
         raise ValueError("Ragged v1 does not support expert/sequence parallelism or EPLB")
     if mc.dtype != torch.bfloat16 or not mc.enforce_eager:
@@ -64,6 +65,8 @@ class TensorParallelPackedExperts(PackedExperts):
     Checkpoint widths remain global and independent of TP. Floor boundaries
     partition odd and zero widths without padding, overlap or lost neurons.
     The local gate/up rows and down columns always use the same interval.
+    These are TP-group ranks, never global or DP*TP ranks: every DP replica
+    retains all experts and contributes down biases once within its own group.
     """
 
     def __init__(self, widths, hidden_size, **kwargs):

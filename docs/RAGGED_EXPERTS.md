@@ -19,9 +19,10 @@ retain their existing behavior.
   Gemma4 likewise exports its complete language tower and retains its dense MLP
   branch, norms and routing scales. Its multimodal checkpoint prefix is mapped
   explicitly; missing language-model weights fail loading.
-- GPU inference only. vLLM **0.29.0**, BF16, DP=1, eager mode. Tensor parallelism
+- GPU inference only. vLLM **0.29.0**, BF16, eager mode. Tensor parallelism
   splits each expert's retained neurons across GPUs. Pipeline parallelism
-  partitions whole layers. HF uses balanced GPU placement when
+  partitions whole layers. Data parallelism replicates the compact model across
+  serving engines, with optional TP inside each replica. HF uses balanced GPU placement when
   multiple GPUs are visible, and rejects CPU/disk offload.
 - Unequal widths, widths not divisible by kernel tile size, zero-width experts,
   and all-zero expert layers preserve their original router IDs and weights.
@@ -139,7 +140,9 @@ For two-way tensor parallelism, expose two allocated GPUs (for example
 `--max-num-seqs 2` to allow two concurrent sequences, then submit two prompts
 in one completions request or send two concurrent requests. This scheduler
 limit alone does not create a batch. The same compact checkpoint works at
-TP=1 or TP=2 without re-pruning or changing its config.
+TP=1/2/4/8 without re-pruning or changing its config, provided the model
+satisfies the native divisibility rules below. For TP=4 or TP=8, expose four
+or eight allocated GPUs and set `--tensor-parallel-size 4` or `8`.
 
 For pipeline parallelism, use `--pipeline-parallel-size N` and expose
 `TP * N` allocated GPUs. Qwen3.5 requires a linear-attention layer in each
@@ -175,6 +178,40 @@ buffers grow with scheduled tokens and top-k (including the largest local
 expert width). Prefill may schedule many more tokens than the request count.
 The scheduler's token budget and available memory remain constraints; higher
 TP or batch size is not a guarantee of higher throughput.
+
+### Data parallel serving
+
+Use vLLM's native API server and internal load balancing. For example, two
+replicas, each split across two GPUs, require **four allocated GPUs**:
+
+```bash
+docker run --rm --gpus '"device=0,1,2,3"' --shm-size=8g -p 8000:8000 \
+  -e VLLM_PLUGINS=less_is_moe_ragged \
+  --mount type=bind,src=/absolute/path/outputs,dst=/outputs,readonly \
+  less-is-moe:dev-unified \
+  vllm serve /outputs/qwen-layer \
+  --dtype bfloat16 --enforce-eager \
+  --tensor-parallel-size 2 --data-parallel-size 2 --max-num-seqs 4
+```
+
+Each DP replica has its own KV cache and a complete set of routed experts;
+only the TP ranks **within that replica** partition each expert and sum its
+output. The compact backend does not use stock FusedMoE's DP×TP expert
+partitioning or all-to-all dispatch. The native vLLM coordinator still manages
+MoE forward waves, including idle replicas. Routing within a request remains
+unchanged, and no checkpoint/config conversion is needed.
+
+Submit concurrent requests to the same endpoint; vLLM distributes them across
+replicas. `--max-num-seqs` is a per-replica scheduling ceiling. DP=2/TP=1 uses
+two GPUs; DP=2/TP=2 uses four; DP=2/TP=4 uses eight. DP replicates memory rather
+than making one model fit in less total memory. These counts assume PP=1.
+
+Use `vllm serve` or the native `AsyncLLM` engine for this mode. In vLLM 0.29.0,
+single-process synchronous `LLM(data_parallel_size=2)` is not supported with
+the default executor. See [vLLM's DP serving guide](https://docs.vllm.ai/en/v0.29.0/serving/data_parallel_deployment/).
+The delivery validation covers single-node multiprocessing with PP=1;
+multi-node/Ray, DP combined with PP, and overlapping microbatches require
+separate validation. EP, EPLB and sequence parallelism remain unsupported.
 
 This registers separate architectures; it does not replace the stock model classes
 or enable the historical model patches. Model files do not execute remote code.
