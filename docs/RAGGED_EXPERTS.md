@@ -87,8 +87,20 @@ portable format. Unsupported versions, layers and widths fail validation.
 
 ## Prune and load
 
-Use the existing unified GPU Docker and install this revision of the package.
-All third-party versions remain pinned. The model must fit entirely on GPU.
+Build the existing root Dockerfile from this revision. It installs the pruning
+implementation and vLLM plugin into the image with the same locked dependencies;
+no source mount or package installation is needed when running the container.
+
+```bash
+docker build --platform linux/amd64 \
+  --build-arg REVISION="$(git rev-parse HEAD)" --build-arg VERSION=dev \
+  -t less-is-moe:dev-unified .
+```
+
+Mount models, calibration data and outputs as described in
+[Docker usage](DOCKER.md#mount-data-and-update-dependencies). Inside that GPU
+container, prune with the command below. The full language model must fit on
+the visible GPUs.
 
 ```bash
 python -m less_is_moe.intdim.prune \
@@ -98,7 +110,12 @@ python -m less_is_moe.intdim.prune \
   --calib_data /data/calibration.jsonl --n_samples 128 --seq_len 256 --dtype bf16
 ```
 
-Use `--prune_mode global` for IntDim-G. HF GPU reference loading:
+Use `--prune_mode global` for IntDim-G. Both modes directly compact the same
+calibration-selected neuron plan used by zero-masking. The separate
+`--from_zeroed_model` option remains limited to uniform IntDim-E structural
+conversion.
+
+HF GPU reference loading:
 
 ```python
 from less_is_moe.intdim.ragged import load_checkpoint
@@ -109,9 +126,17 @@ vLLM must load the new plugin in every worker. The Docker default disables all
 plugins; explicitly enable only this one for compact checkpoints:
 
 ```bash
-VLLM_PLUGINS=less_is_moe_ragged vllm serve /outputs/qwen-layer \
+docker run --rm --gpus 'device=0' --shm-size=8g -p 8000:8000 \
+  -e VLLM_PLUGINS=less_is_moe_ragged \
+  --mount type=bind,src=/absolute/path/outputs,dst=/outputs,readonly \
+  less-is-moe:dev-unified \
+  vllm serve /outputs/qwen-layer \
   --dtype bfloat16 --tensor-parallel-size 1 --enforce-eager
 ```
+
+For a large model, expose multiple allocated GPUs and add
+`--pipeline-parallel-size N`, where `N` is the number of visible GPUs. Qwen3.5
+requires a linear-attention layer in each pipeline stage with vLLM 0.29.0.
 
 This registers separate architectures; it does not replace the stock model classes
 or enable the historical model patches. Model files do not execute remote code.
@@ -131,89 +156,6 @@ width; unused tiles return without matrix arithmetic. This is not yet an
 optimal ragged tile scheduler. The HF reference intentionally uses per-expert
 GPU operations and is a correctness oracle, not the accelerated backend.
 
-## Reproduce validation
-
-Completed B200 evidence: [expanded GPT-OSS, Qwen3.5 and Gemma coverage](validation/ragged-expanded-b200-2026-09-17.md),
-[original four full models and eight L/G cases](validation/ragged-four-models-b200-2026-09-16.md),
-and [the earlier BF16/FP32 diagnosis](validation/ragged-precision-b200-2026-09-16.md).
-
-Acceptance is physical removal of the same neurons selected for zero-masking,
-saved compact weights/config, exact HF reload and successful adapted-vLLM
-inference. Generation equality is recorded for diagnosis, not required for
-this feasibility check. No end-to-end throughput improvement is claimed.
-
-One shared full-model harness runs both IntDim-L and IntDim-G at 50%, saves
-both compact checkpoints, verifies exact HF reload, and generates with stock
-zero-mask vLLM and adapted compact vLLM in separate processes:
-
-```bash
-python -m docker.ragged_model_matrix --case qwen15 --model /models/Qwen1.5-MoE-A2.7B --output /results/qwen15
-python -m docker.ragged_model_matrix --case olmoe --model /models/OLMoE-1B-7B-0924 --output /results/olmoe
-python -m docker.ragged_model_matrix --case qwen3 --model /models/Qwen3-30B-A3B --output /results/qwen3
-python -m docker.ragged_model_matrix --case qwen35 --model /models/Qwen3.5-35B-A3B --output /results/qwen35
-python -m docker.ragged_model_matrix --case gemma4 --model /models/Gemma-4-26B-A4B --output /results/gemma4
-# Three visible GPUs for full 120B-class BF16 calibration and PP=3 serving:
-python -m docker.ragged_model_matrix --case qwen35122 --model /models/Qwen3.5-122B-A10B --output /results/qwen35122 --pipeline-parallel-size 3
-python -m docker.ragged_model_matrix --case gptoss --model /models/gpt-oss-120b --output /results/gptoss --pipeline-parallel-size 3
-```
-
-Run sequentially per selected GPU group. Both baseline and compact runs use
-the same pipeline-parallel size. Ensure enough GPU memory for calibration
-weights plus gradients, and enough checkpoint storage for the selected models. `--scratch` defaults to `/dev/shm` for temporary
-zero-mask baselines; use a disk directory with enough space if needed. Compact
-checkpoints remain under `<output>/{layer,global}/compact`. The harness uses
-the same four short calibration texts, two held-out prompts and 128 generated
-tokens per prompt for each model. Tokenization differs by model. It verifies
-the original layer/expert/hidden dimensions and the exact 50% neuron budget.
-Use `--max-tokens` to change generation length. Each matrix records token
-match counts, common-prefix lengths and the first differing generated token.
-This is a full-weight pipeline smoke test, not a quality or speed benchmark.
-
-From the repository root, inside the pinned image with a visible B200:
-
-```bash
-uv pip install --no-deps --no-build-isolation -e .
-python -m pytest -q tests/test_ragged_intdim.py
-export VLLM_PLUGINS=less_is_moe_ragged
-python -m docker.ragged_qwen_smoke prepare --model tiny --scope layer --output /results/tiny-layer
-python -m docker.ragged_qwen_smoke generate --output /results/tiny-layer --checkpoint masked
-python -m docker.ragged_qwen_smoke generate --output /results/tiny-layer --checkpoint compact
-```
-
-Repeat with `--scope global` and a separate output directory. `tiny` is an
-explicit random, two-layer architecture fixture; it is not pretrained evidence.
-For a complete model, replace `tiny` with its local checkpoint path. The harness
-uses the entire checkpoint, four short calibration examples and two held-out
-prompts; there is no layer, expert or hidden-size reduction before pruning.
-These examples establish pipeline feasibility, not model quality.
-
-Run HF preparation and vLLM initialization **serially** on a dedicated GPU.
-vLLM profiles available memory at startup; another process allocating model
-weights during that interval can invalidate its KV-cache memory estimate.
-
-The harness stores zero-mask and compact checkpoints, exact HF reload checks,
-logit errors, widths, parameter counts, memory, environment, and vLLM output
-tokens. Prepare and generate run in separate processes. Compare stock vLLM
-zero-mask with custom vLLM compact under identical settings before attributing
-any future measured speedup to pruning.
-
-### Numerical checks
-
-The compact weights reload bitwise. Removing zero columns can change BF16 GEMM
-rounding; later top-k routers can amplify small differences, so full-model
-BF16 logits are not expected to be bitwise identical. The current harness exactly checks retained weights/biases and removed zero
-down columns for every expert. It also compares three experts in every layer
-against their zero-masked counterpart in FP32 on GPU
-(`rtol=1e-4`, `atol=1e-5`, TF32 disabled). It separately records BF16 logit
-maximum error, RMSE, cosine similarity, KL divergence and first-token agreement.
-For full checkpoints, cosine >= 0.995 and reference-to-compact KL <= 0.01 are
-numerical sanity gates on the two smoke prompts, not an accuracy benchmark or
-a claim that every output token will match. The standalone harness fails when
-these gates fail by default. The full-model matrix explicitly passes
-`--allow-logit-drift`: it preserves the failed numerical check in the report
-and independently completes checkpoint/reload/inference validation. FP32 expert tolerance failures are also recorded when this flag is enabled.
-Exact retained-weight/removed-column checks and exact reload remain mandatory. An inference pass must not be
-reported as a passed numerical-equivalence check. Tiny fixtures retain a direct
-elementwise BF16 comparison. The first full-model elementwise tolerance check
-failed; that difference is retained in the validation report rather than
-being described as exact equivalence.
+Removing zero columns changes matrix reduction order, so BF16 outputs can
+vary from a zero-mask baseline. Exact token equality and throughput improvement
+are not guaranteed by this backend.

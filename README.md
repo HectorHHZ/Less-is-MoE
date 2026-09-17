@@ -152,7 +152,7 @@ export, an explicit HF loader and vLLM integration on the same pinned runtime.
 It supports Qwen1.5-MoE, OLMoE, Qwen3-MoE, Qwen3.5-MoE, GPT-OSS and Gemma4
 text inference using BF16 and eager execution. Large checkpoints can use
 pipeline parallelism across GPUs (TP=DP=1). GPT-OSS source weights are
-explicitly dequantized from MXFP4 to BF16 for both comparison paths.
+explicitly dequantized from MXFP4 to BF16 before pruning.
 
 ## Pruning
 

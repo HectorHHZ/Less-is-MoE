@@ -214,7 +214,8 @@ For Qwen1.5-MoE, OLMoE, Qwen3-MoE, Qwen3.5-MoE, GPT-OSS and Gemma4 text models,
 non-uniform format. Its vLLM backend requires
 `VLLM_PLUGINS=less_is_moe_ragged`, BF16, TP=DP=1 and eager execution. Pipeline
 parallelism can partition large models across GPUs. GPT-OSS's published MXFP4
-weights are dequantized to BF16 before pruning and before both comparisons. See
+weights are dequantized to BF16 before pruning. The existing root Dockerfile
+packages the implementation and plugin with the same dependency lock. See
 [ragged expert support](RAGGED_EXPERTS.md); stock runtime defaults stay the same.
 `--mode structural --from_zeroed_model` compacts a uniformly zero-masked
 checkpoint without calibration. Empty calibration for scoring is rejected.
