@@ -14,10 +14,11 @@ the second virtual environment alongside it.
 
 ## 3. Prune
 
-Choose a model-specific launcher in `scripts/prune/`. The `neuron_drop_*`
-scripts retain tensor shapes and zero/mask selected units. The
-`neuron_structure_drop_*` scripts create physically smaller structures and
-write configuration metadata needed by the runtime patches.
+Run `python -m less_is_moe.intdim.prune`. `--mode mask` retains tensor shapes
+and zeroes the selected units; `--mode structural` creates physically smaller
+structures and writes the configuration metadata the runtime patches need. The
+per-family launchers under `scripts/prune/` still work for one release and
+forward to the same command.
 
 The importance statistic in this release is the mean absolute gradient:
 

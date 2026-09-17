@@ -68,8 +68,8 @@ an installable `src/` package, with thin launchers under `scripts/`.
 
 | Area | Supported model families | Entry points |
 | --- | --- | --- |
-| Mask-based neuron pruning | Qwen1.5-MoE, Qwen3-MoE, Qwen3.5-MoE, OLMoE | `scripts/prune/neuron_drop_*.sh` |
-| Structural neuron pruning | Qwen1.5-MoE, Qwen3-MoE, Qwen3.5-MoE, OLMoE | `scripts/prune/neuron_structure_drop_*.sh` |
+| Neuron pruning, mask and structural | Every family `less_is_moe.intdim.discover` recognises: Qwen1.5-MoE, Qwen3-MoE, Qwen3.5-MoE, OLMoE, gpt-oss, Gemma-4 | `python -m less_is_moe.intdim.prune` |
+| Deprecated per-family launchers | The four original families | `scripts/prune/*.sh`, forwarding to the command above for one release |
 | Pruned checkpoint loading | The same four families, for Hugging Face and vLLM | `less_is_moe.model_patches` |
 | Evaluation | Qwen strict zero-shot; OLMoE multi-shot | `scripts/evaluate/` |
 | SFT | Base checkpoints and already-pruned checkpoints only | `scripts/train/` |
@@ -148,24 +148,28 @@ locks, mounts, and the planned `0.1.0-unified` GHCR release.
 
 ## Pruning
 
-Every shell launcher forwards its arguments to a package module. The following
-example performs structural Qwen3-MoE pruning; replace the model, data, and
-output values with paths available on your system.
+One command prunes every supported family; it finds the expert weights from
+the checkpoint itself rather than from per-family code. The following example
+performs structural Qwen3-MoE pruning; replace the model, data, and output
+values with paths available on your system.
 
 ```bash
-scripts/prune/neuron_structure_drop_qwen3.sh \
+python -m less_is_moe.intdim.prune \
   --model_name_or_path MODEL_ID_OR_LOCAL_PATH \
   --output_dir outputs/qwen3-structural-p50 \
+  --mode structural \
   --drop_ratio 0.5 \
   --calib_data data/calibration.jsonl \
   --n_samples 128 \
   --seq_len 2048
 ```
 
-Use `neuron_drop_*` to produce a masked/zeroed checkpoint and
-`neuron_structure_drop_*` to remove the selected structures physically. Run a
-launcher with `--help` for model-specific options. Calibration datasets and
-model weights are not distributed in this repository.
+Use `--mode mask` to produce a masked/zeroed checkpoint and `--mode structural`
+to remove the selected units physically; `--prune_mode expert|layer|global`
+selects the scope. Run it with `--help` for the full flag list. The former
+`scripts/prune/*.sh` launchers keep their names and flags for one release and
+forward to this command. Calibration datasets and model weights are not
+distributed in this repository.
 
 ## Evaluation
 

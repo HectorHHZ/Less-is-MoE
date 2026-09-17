@@ -98,8 +98,8 @@ def test_legacy_intdim_e_equivalence(family, native, runtime):
             new = copy.deepcopy(model)
     old = copy.deepcopy(model)
     suffix = LEGACY[family]
-    legacy_score = importlib.import_module(f"less_is_moe.pruning.neuron_drop_{suffix}")
-    legacy_shrink = importlib.import_module(f"less_is_moe.pruning.neuron_structure_drop_{suffix}")
+    legacy_score = importlib.import_module(f"legacy_reference.neuron_drop_{suffix}")
+    legacy_shrink = importlib.import_module(f"legacy_reference.neuron_structure_drop_{suffix}")
     handles = discover(new)
     layers = [h.layer_index for h in handles]
     batches = [torch.tensor([[1, 3, 5, 7, 9, 11]], device=runtime[0]), torch.tensor([[2, 4, 6, 8, 10, 12]], device=runtime[0])]
@@ -153,7 +153,7 @@ def test_legacy_intdim_e_equivalence(family, native, runtime):
 
 def _case_layers(model, case):
     if case.reference == "qwen3_5":
-        from less_is_moe.pruning.neuron_drop_qwen3_5 import _get_decoder_layers
+        from legacy_reference.neuron_drop_qwen3_5 import _get_decoder_layers
         return _get_decoder_layers(model)
     return model.model.layers
 
@@ -321,7 +321,7 @@ def test_uniform_intdim_e(case, runtime, tmp_path, monkeypatch):
     original_config = reference.config.to_dict()
     calib = [torch.tensor([row], device=device) for row in ([1, 3, 5, 7, 9, 11], [2, 4, 6, 8, 10, 12])]
     evaluation = calib + [torch.tensor([[13, 15, 17, 19]], device=device)]
-    old_score = importlib.import_module(f"less_is_moe.pruning.neuron_drop_{case.reference}")
+    old_score = importlib.import_module(f"legacy_reference.neuron_drop_{case.reference}")
     old_compact = None
 
     with _forbid_autodetect(monkeypatch):
@@ -331,7 +331,7 @@ def test_uniform_intdim_e(case, runtime, tmp_path, monkeypatch):
         _assert_state_equal(reference, expected_mask)
         if not case.ported_reference:
             old_compact = copy.deepcopy(reference)
-            shrink = importlib.import_module(f"less_is_moe.pruning.neuron_structure_drop_{case.reference}")
+            shrink = importlib.import_module(f"legacy_reference.neuron_structure_drop_{case.reference}")
             shrink.structurally_remove_neurons(old_compact, dropped, layers)
             _set_reference_width(old_compact, case, case.width // 2)
         old_score.zero_dropped_neurons(reference, dropped, layers)
@@ -349,7 +349,7 @@ def test_uniform_intdim_e(case, runtime, tmp_path, monkeypatch):
     assert automatic_plan == dropped
     # All scopes use an independent legacy selector and mask audit. Exercise
     # the real public pipeline, including its own scoring, rather than a mock.
-    selector = importlib.import_module("less_is_moe.pruning.neuron_drop_qwen15_moe")
+    selector = importlib.import_module("legacy_reference.neuron_drop_qwen15_moe")
     for scope in pruning.PRUNE_MODES:
         with _forbid_autodetect(monkeypatch):
             expected_plan = selector.pick_neurons_to_drop(reference_scores, 0.5, scope)

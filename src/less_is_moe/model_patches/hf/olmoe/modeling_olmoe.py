@@ -2,8 +2,8 @@
 Pruned OLMoE SparseMoeBlock and DecoderLayer with per-layer expert counts.
 
 Drop-in replacement for ``transformers.models.olmoe.modeling_olmoe`` classes.
-Handles checkpoints saved by ``scripts/expert_drop_olmoe.py`` /
-``scripts/neuron_structure_drop_olmoe.py`` whose ``config.num_experts`` is a
+Handles checkpoints saved by ``scripts/expert_drop_olmoe.py`` or by
+``python -m less_is_moe.intdim.prune --mode structural`` whose ``config.num_experts`` is a
 **per-layer list** (e.g. ``[32, 32, 33, 32, ...]``) instead of a single int.
 
 Key differences from upstream:

@@ -6,7 +6,11 @@ live in the installable `less_is_moe` package.
 
 ## Pruning
 
-| Original script | Package module | Launcher |
+This table records the original consolidation. The package modules in the
+middle column were later retired; see
+[Retirement of the per-family pruning modules](#retirement-of-the-per-family-pruning-modules).
+
+| Original script | Package module (retired) | Launcher |
 | --- | --- | --- |
 | `scripts/neuron_structure_drop_qwen3.py` | `less_is_moe.pruning.neuron_structure_drop_qwen3` | `scripts/prune/neuron_structure_drop_qwen3.sh` |
 | `scripts/neuron_structure_drop_qwen3_5.py` | `less_is_moe.pruning.neuron_structure_drop_qwen3_5` | `scripts/prune/neuron_structure_drop_qwen3_5.sh` |
@@ -19,6 +23,27 @@ live in the installable `less_is_moe` package.
 
 Dots were removed from Python module names (`qwen1.5` became `qwen15`) so the
 modules can be imported normally.
+
+### Retirement of the per-family pruning modules
+
+Those eight modules, plus the `gpt_oss` and `gemma4` ports added later, were
+retired once `less_is_moe.intdim.prune` reproduced them tensor by tensor
+(issue #25). They are no longer installed:
+
+| Retired module | Replacement |
+| --- | --- |
+| `less_is_moe.pruning.neuron_drop_*` | `python -m less_is_moe.intdim.prune --mode mask` |
+| `less_is_moe.pruning.neuron_structure_drop_*` | `python -m less_is_moe.intdim.prune --mode structural` |
+
+The launchers in `scripts/prune/` keep their names and flags for one release
+and forward to the unified command, adding `--mode` and, for Qwen1.5-MoE and
+OLMoE, `--no-unwrap_message_content` to preserve their calibration behavior.
+
+The module sources moved to `tests/legacy_reference/`, where the equivalence
+suite imports them as the oracle. Pinning their outputs as fixtures was the
+alternative; floating-point scores drift with PyTorch and Transformers
+versions, so the original code is kept and run instead. The `expert_drop_*`
+baselines are unaffected and remain in `less_is_moe.pruning`.
 
 ## Evaluation
 
