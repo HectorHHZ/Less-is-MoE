@@ -212,8 +212,10 @@ python -m less_is_moe.intdim.prune \
 For Qwen1.5-MoE, OLMoE, Qwen3-MoE, Qwen3.5-MoE, GPT-OSS and Gemma4 text models,
 `--mode ragged --prune_mode layer|global` adds a separate compact
 non-uniform format. Its vLLM backend requires
-`VLLM_PLUGINS=less_is_moe_ragged`, BF16, TP=DP=1 and eager execution. Pipeline
-parallelism can partition large models across GPUs. GPT-OSS's published MXFP4
+`VLLM_PLUGINS=less_is_moe_ragged`, BF16, DP=1 and eager execution. Tensor
+parallelism shards each expert's retained width, and pipeline parallelism can
+partition whole layers across GPUs. Batch size follows vLLM's scheduler limits.
+GPT-OSS's published MXFP4
 weights are dequantized to BF16 before pruning. The existing root Dockerfile
 packages the implementation and plugin with the same dependency lock. See
 [ragged expert support](RAGGED_EXPERTS.md); stock runtime defaults stay the same.

@@ -19,9 +19,9 @@ retain their existing behavior.
   Gemma4 likewise exports its complete language tower and retains its dense MLP
   branch, norms and routing scales. Its multimodal checkpoint prefix is mapped
   explicitly; missing language-model weights fail loading.
-- GPU inference only. vLLM **0.29.0**, BF16, TP=DP=1, eager mode. Pipeline
-  parallelism partitions whole layers across GPUs for 120B-class models; expert
-  tensor parallelism remains unsupported. HF uses balanced GPU placement when
+- GPU inference only. vLLM **0.29.0**, BF16, DP=1, eager mode. Tensor parallelism
+  splits each expert's retained neurons across GPUs. Pipeline parallelism
+  partitions whole layers. HF uses balanced GPU placement when
   multiple GPUs are visible, and rejects CPU/disk offload.
 - Unequal widths, widths not divisible by kernel tile size, zero-width experts,
   and all-zero expert layers preserve their original router IDs and weights.
@@ -134,9 +134,42 @@ docker run --rm --gpus 'device=0' --shm-size=8g -p 8000:8000 \
   --dtype bfloat16 --tensor-parallel-size 1 --enforce-eager
 ```
 
-For a large model, expose multiple allocated GPUs and add
-`--pipeline-parallel-size N`, where `N` is the number of visible GPUs. Qwen3.5
-requires a linear-attention layer in each pipeline stage with vLLM 0.29.0.
+For two-way tensor parallelism, expose two allocated GPUs (for example
+`--gpus '"device=0,1"'`) and use `--tensor-parallel-size 2`. Add
+`--max-num-seqs 2` to allow two concurrent sequences, then submit two prompts
+in one completions request or send two concurrent requests. This scheduler
+limit alone does not create a batch. The same compact checkpoint works at
+TP=1 or TP=2 without re-pruning or changing its config.
+
+For pipeline parallelism, use `--pipeline-parallel-size N` and expose
+`TP * N` allocated GPUs. Qwen3.5 requires a linear-attention layer in each
+pipeline stage with vLLM 0.29.0. Combined TP and PP requires separate validation.
+
+### Tensor parallelism and larger batches
+
+Each rank `r` in a TP group of size `P` loads the retained-neuron interval
+`[floor(I_e*r/P), floor(I_e*(r+1)/P))` of expert `e`. Gate/up rows and down
+columns use the same interval. Odd widths, widths smaller than `P` and empty
+experts require no padding. Original expert IDs and routing remain unchanged.
+The shared ragged kernels compute local contributions; a TP all-reduce sums
+them before shared-expert addition or downstream normalization. GPT-OSS gate/up
+biases follow the neuron slices; rank zero alone contributes the down bias,
+including for an empty expert. Upstream vLLM handles attention, embedding,
+dense and shared-expert tensor parallelism.
+
+There is no hardcoded TP=2 or batch-size=2 limit. Larger TP must still satisfy
+the original model's attention/head and dense/shared projection divisibility
+rules. Narrower expert shards can underutilize GPU tiles, and the routed branch
+adds one all-reduce per MoE layer. Loading currently slices global checkpoint
+tensors on each rank, so startup I/O and host-memory pressure also need checking
+at larger TP. Different BF16 reduction orders can change logits and tokens.
+
+For larger batches, increase `--max-num-seqs` within the GPU memory budget.
+KV-cache usage grows with concurrent sequence lengths, and temporary expert
+buffers grow with scheduled tokens and top-k (including the largest local
+expert width). Prefill may schedule many more tokens than the request count.
+The scheduler's token budget and available memory remain constraints; higher
+TP or batch size is not a guarantee of higher throughput.
 
 This registers separate architectures; it does not replace the stock model classes
 or enable the historical model patches. Model files do not execute remote code.

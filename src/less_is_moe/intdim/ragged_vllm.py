@@ -1,13 +1,20 @@
 """Shared ragged expert kernels and vLLM 0.29.0 model adapters.
 
-GPU BF16, TP=DP=1, optional layer pipeline parallelism, eager. Upstream attention, decoder/model forwards,
-weight mappings and hybrid-cache methods are reused without global patches.
+GPU BF16, tensor/layer pipeline parallelism, DP=1, eager. Upstream attention,
+decoder/model forwards, weight mappings and hybrid-cache methods are reused
+without global patches.
 No stock FusedMoE or rectangular routed-expert weights are instantiated.
 """
+
+from functools import partial
 
 import torch
 from torch import nn
 import vllm
+from vllm.distributed import (
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm, GemmaRMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -30,8 +37,8 @@ def _validate(vllm_config):
     if vllm.__version__ != "0.29.0":
         raise ValueError("Ragged v1 is pinned to vLLM 0.29.0")
     pc, mc = vllm_config.parallel_config, vllm_config.model_config
-    if any(getattr(pc, key, 1) != 1 for key in ("tensor_parallel_size", "data_parallel_size")):
-        raise ValueError("Ragged requires TP=DP=1; use pipeline parallelism for large checkpoints")
+    if getattr(pc, "data_parallel_size", 1) != 1:
+        raise ValueError("Ragged requires DP=1")
     if pc.enable_expert_parallel or pc.enable_eplb or getattr(pc, "use_sequence_parallel_moe", False):
         raise ValueError("Ragged v1 does not support expert/sequence parallelism or EPLB")
     if mc.dtype != torch.bfloat16 or not mc.enforce_eager:
@@ -45,6 +52,57 @@ def _validate(vllm_config):
     return config
 
 
+class TensorParallelPackedExperts(PackedExperts):
+    """Shard each compact expert along its retained intermediate dimension.
+
+    Checkpoint widths remain global and independent of TP. Floor boundaries
+    partition odd and zero widths without padding, overlap or lost neurons.
+    The local gate/up rows and down columns always use the same interval.
+    """
+
+    def __init__(self, widths, hidden_size, **kwargs):
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.global_widths = tuple(widths)
+        self.local_ranges = tuple((w * self.tp_rank // self.tp_size,
+                                   w * (self.tp_rank + 1) // self.tp_size) for w in widths)
+        super().__init__([end - start for start, end in self.local_ranges], hidden_size, **kwargs)
+        # AutoWeightsLoader uses these loaders for flat compact parameters.
+        for name, parameter in self.named_parameters(recurse=False):
+            parameter.weight_loader = partial(self._load_weight, name=name)
+
+    @torch.no_grad()
+    def _load_weight(self, parameter, loaded_weight, *, name):
+        hidden = self.hidden_size
+        if name == "down_proj_bias":
+            if tuple(loaded_weight.shape) != (len(self.widths), hidden):
+                raise ValueError("Invalid compact down bias shape")
+            # A down bias belongs to the complete expert, not to each shard.
+            # Rank zero contributes it once, including for zero-width experts.
+            if self.tp_rank == 0:
+                parameter.copy_(loaded_weight)
+            else:
+                parameter.zero_()
+            return
+        stride = {"gate_up_proj": 2 * hidden, "down_proj": hidden,
+                  "gate_up_proj_bias": 2}[name]
+        if tuple(loaded_weight.shape) != (sum(self.global_widths) * stride,):
+            raise ValueError(f"Invalid compact {name} shape")
+        source_offset = 0
+        for expert, (width, (start, end)) in enumerate(zip(self.global_widths, self.local_ranges)):
+            local_width = end - start
+            source = loaded_weight.narrow(0, source_offset * stride, width * stride)
+            target = parameter.narrow(0, self.offsets[expert] * stride, local_width * stride)
+            if name == "gate_up_proj":
+                source, target = source.view(2, width, hidden), target.view(2, local_width, hidden)
+                target.copy_(source[:, start:end, :])
+            elif name == "down_proj":
+                target.view(hidden, local_width).copy_(source.view(hidden, width)[:, start:end])
+            else:
+                target.view(2, local_width).copy_(source.view(2, width)[:, start:end])
+            source_offset += width
+
+
 class RaggedMLP(nn.Module):
     """Shared routed experts; retain each family's routing and shared branch."""
     def __init__(self, config, widths, prefix):
@@ -53,10 +111,10 @@ class RaggedMLP(nn.Module):
         self.renormalize = getattr(config, "norm_topk_prob", True)
         self.gate = ReplicatedLinear(config.hidden_size, config.num_experts, bias=False,
                                      quant_config=None, prefix=f"{prefix}.gate")
-        self.experts = PackedExperts(widths, config.hidden_size)
-        self.register_buffer("widths", torch.tensor(widths, dtype=torch.int32), persistent=False)
+        self.experts = TensorParallelPackedExperts(widths, config.hidden_size)
+        self.register_buffer("widths", torch.tensor(self.experts.widths, dtype=torch.int32), persistent=False)
         self.register_buffer("offsets", torch.tensor(self.experts.offsets, dtype=torch.int64), persistent=False)
-        self.max_width = max(widths)
+        self.max_width = max(self.experts.widths)
         shared_width = getattr(config, "shared_expert_intermediate_size", 0)
         self.shared_expert = None
         if shared_width:
@@ -75,8 +133,7 @@ class RaggedMLP(nn.Module):
         weights, ids = torch.topk(probabilities, self.top_k, dim=-1)
         if self.renormalize:
             weights = weights / weights.sum(dim=-1, keepdim=True)
-        result = ragged_experts(hidden, self.experts.gate_up_proj, self.experts.down_proj,
-                                self.widths, self.offsets, self.max_width, ids, weights.to(hidden.dtype))
+        result = _run_packed(self, hidden, ids, weights.to(hidden.dtype))
         if self.shared_expert is not None:
             result = result + self.shared_expert(hidden)
         return result.reshape(shape)
@@ -190,7 +247,7 @@ class RaggedQwen35Model(q35.Qwen3_5Model):
 
 
 class _RaggedCausalLM(nn.Module, SupportsPP):
-    # Only layer pipeline parallelism is supported; reject other modes early.
+    # Expert columns use TP; whole decoder layers can additionally use PP.
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
     embedding_modules = {"embed_tokens": "input_embeddings", "lm_head": "output_embeddings"}
 
@@ -260,19 +317,24 @@ class RaggedQwen3_5MoeForCausalLM(_RaggedCausalLM, HasInnerState, IsHybrid, Supp
 # Bias/activation variants reuse the same packed storage and Triton GEMMs.
 def _run_packed(module, hidden, ids, weights):
     experts = module.experts
-    return ragged_experts(hidden, experts.gate_up_proj, experts.down_proj,
-                           module.widths, module.offsets, module.max_width, ids, weights,
-                           activation=experts.activation,
-                           gate_up_bias=getattr(experts, "gate_up_proj_bias", None),
-                           down_bias=getattr(experts, "down_proj_bias", None))
+    result = ragged_experts(hidden, experts.gate_up_proj, experts.down_proj,
+                            module.widths, module.offsets, module.max_width, ids, weights,
+                            activation=experts.activation,
+                            gate_up_bias=getattr(experts, "gate_up_proj_bias", None),
+                            down_bias=getattr(experts, "down_proj_bias", None))
+    # Every rank has the same token routes and a disjoint neuron interval.
+    # Reduce before adding shared experts or applying downstream norms.
+    if experts.tp_size > 1:
+        result = tensor_model_parallel_all_reduce(result)
+    return result
 
 
 def _init_packed(module, config, layer):
     widths = config.less_is_moe["expert_intermediate_sizes"][str(layer)]
-    module.experts = PackedExperts(widths, config.hidden_size, **expert_options(config))
-    module.register_buffer("widths", torch.tensor(widths, dtype=torch.int32), persistent=False)
+    module.experts = TensorParallelPackedExperts(widths, config.hidden_size, **expert_options(config))
+    module.register_buffer("widths", torch.tensor(module.experts.widths, dtype=torch.int32), persistent=False)
     module.register_buffer("offsets", torch.tensor(module.experts.offsets, dtype=torch.int64), persistent=False)
-    module.max_width = max(widths)
+    module.max_width = max(module.experts.widths)
 
 
 class RaggedGptMLP(nn.Module):
