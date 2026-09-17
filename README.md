@@ -63,17 +63,26 @@ Qwen3-MoE, OLMoE, sparse upcycled models.
 
 This repository contains the release implementation for pruning, loading,
 fine-tuning, quantizing, and evaluating pruned mixture-of-experts language
-models. It consolidates the experiment scripts and runtime model patches into
-an installable `src/` package, with thin launchers under `scripts/`.
+models. Pruning is **one implementation for every family**: expert weights are
+located from parameter shapes rather than per-family code, so a new backbone
+normally needs no new pruning module.
 
-| Area | Supported model families | Entry points |
+| Area | Scope | Entry point |
 | --- | --- | --- |
-| Neuron pruning, mask and structural | Every family `less_is_moe.intdim.discover` recognises: Qwen1.5-MoE, Qwen3-MoE, Qwen3.5-MoE, OLMoE, gpt-oss, Gemma-4 | `python -m less_is_moe.intdim.prune` |
-| Deprecated per-family launchers | The four original families | `scripts/prune/*.sh`, forwarding to the command above for one release |
-| Pruned checkpoint loading | The same four families, for Hugging Face and vLLM | `less_is_moe.model_patches` |
+| MoE discovery | Fused and per-expert layouts; layout resolved empirically, never guessed | `less_is_moe.intdim.discover` |
+| Neuron pruning | IntDim-E, IntDim-L and IntDim-G selection; `mask` and `structural` output | `python -m less_is_moe.intdim.prune` |
+| Checkpoint verification | Reloads the pruned checkpoint with stock Transformers classes | `python -m less_is_moe.intdim.verify` |
+| Non-uniform (ragged) export and serving | IntDim-L/G widths kept per expert, with a vLLM backend (arrives with #30) | `--mode ragged`, `VLLM_PLUGINS=…less_is_moe_ragged` |
+| Pinned GPU runtime | One image: CUDA 13.0.3, PyTorch 2.13.0, Transformers 5.17.0, vLLM 0.29.0 | `Dockerfile`, `docker/` |
+| Pruned checkpoint loading | Masked and per-layer-expert checkpoints on Hugging Face and vLLM | `less_is_moe.model_patches` |
+| Expert-drop baselines | Expert-granularity pruning, still per family | `less_is_moe.pruning.expert_drop_*` |
 | Evaluation | Qwen strict zero-shot; OLMoE multi-shot | `scripts/evaluate/` |
 | SFT | Base checkpoints and already-pruned checkpoints only | `scripts/train/` |
 | Quantization | AWQ for legacy/Qwen3; GPTQ for Qwen1.5/Qwen2-MoE | `scripts/quantize/` |
+| Deprecated per-family launchers | The four original families, for one release | `scripts/prune/*.sh` |
+
+Supported families today: **Qwen1.5-MoE, Qwen3-MoE, Qwen3.5-MoE, OLMoE,
+gpt-oss and Gemma-4**.
 
 Important protocol details:
 
@@ -82,6 +91,11 @@ Important protocol details:
   information. The code preserves the criterion actually used for the released
   experiments. Please report this implementation detail when comparing against
   the paper's Fisher importance formulation.
+- `--prune_mode expert` (IntDim-E) keeps one width for every expert, so the
+  result can be compacted into a stock checkpoint. `layer` (IntDim-L) and
+  `global` (IntDim-G) pool units across a layer or the whole model, which
+  produces unequal widths: they are zero-mask results unless `--mode ragged`
+  exports them into the compact format (#30).
 - Qwen1.5-MoE, Qwen3-MoE, and Qwen3.5-MoE use the strict zero-shot evaluator.
   The multi-shot evaluator is only for OLMoE.
 - The two supported SFT paths are ordinary base-model SFT and SFT of an
@@ -95,16 +109,47 @@ behavior and a comparison of the five original evaluation scripts.
 
 ## Installation
 
-Python 3.11 and a CUDA-capable Linux host are recommended. Select the profile
-that matches the model family; the environments are intentionally separate.
+Two supported paths, for different purposes:
+
+| Path | Use it for | Stack |
+| --- | --- | --- |
+| Docker image (recommended) | Pruning, verification and vLLM serving on GPU | One pinned runtime, shared by every family |
+| `setup.sh` profiles | Reproducing the paper's numbers, SFT, expert-drop baselines, AWQ/GPTQ | The original per-family pins |
+
+### Unified Docker runtime
+
+The root Dockerfile provides one pinned Linux/amd64 environment: Python 3.12.14,
+CUDA 13.0.3, PyTorch 2.13.0+cu130, Transformers 5.17.0, vLLM 0.29.0, and
+Tokenizers 0.23.1, resolved from `environments/unified/requirements.txt`.
+
+```bash
+docker build --platform linux/amd64 -t less-is-moe:dev-unified .
+docker run --rm --gpus all less-is-moe:dev-unified python docker/smoke_test.py --gpu
+```
+
+The image runs generic IntDim pruning on stock model implementations and
+disables the legacy runtime replacements. GPU validation covers Qwen2-MoE,
+Qwen3-MoE, OLMoE, Qwen3.5-MoE, GPT-OSS and Gemma 4 using tiny random models,
+including equivalence with the retired per-family algorithms and HF/vLLM
+loading after structural pruning. These checks do not certify full-size
+pretrained model accuracy or native MXFP4 pruning.
+See [Docker usage and GPU validation](docs/DOCKER.md) for exact scope, commands,
+locks, mounts, and the planned `0.1.0-unified` GHCR release.
+
+### Original per-family profiles
+
+The three `setup.sh` profiles remain available for historical reproduction, SFT
+and the expert-drop baselines. They pin the Transformers and vLLM versions each
+published experiment actually used, so they are intentionally incompatible with
+each other and with the unified image.
 
 ```bash
 git clone https://github.com/HectorHHZ/Less-is-MoE.git
 cd Less-is-MoE
 
-./setup.sh legacy   # Qwen1.5-MoE and OLMoE
-# ./setup.sh qwen3  # Qwen3-MoE
-# ./setup.sh qwen35 # Qwen3.5-MoE
+./setup.sh legacy   # Qwen1.5-MoE and OLMoE  (Transformers 4.49, vLLM 0.8.4)
+# ./setup.sh qwen3  # Qwen3-MoE              (Transformers 4.53.1, vLLM 0.8.4)
+# ./setup.sh qwen35 # Qwen3.5-MoE            (Transformers 5.2.0, vLLM 0.19.1)
 
 source .venv-legacy/bin/activate
 ```
@@ -125,27 +170,6 @@ upgrade in them.
 See [the environment matrix](docs/ENVIRONMENTS.md) for exact core versions and
 build notes.
 
-### Unified Docker runtime
-
-The root Dockerfile provides one pinned Linux/amd64 environment: Python 3.12.14,
-CUDA 13.0.3, PyTorch 2.13.0+cu130, Transformers 5.17.0, vLLM 0.29.0, and
-Tokenizers 0.23.1. Build and check it with:
-
-```bash
-docker build --platform linux/amd64 -t less-is-moe:dev-unified .
-docker run --rm --gpus all less-is-moe:dev-unified python docker/smoke_test.py --gpu
-```
-
-The image runs generic IntDim-E on stock model implementations and disables
-legacy runtime replacements. GPU validation covers Qwen2-MoE, Qwen3-MoE,
-OLMoE, Qwen3.5-MoE, GPT-OSS and Gemma 4 using tiny random models, including
-legacy-algorithm equivalence and HF/vLLM loading after structural pruning.
-These checks do not certify full-size pretrained model accuracy or native
-MXFP4 pruning. The original `setup.sh` profiles remain available for historical
-reproduction, SFT and expert-drop baselines.
-See [Docker usage and GPU validation](docs/DOCKER.md) for exact scope, commands,
-locks, mounts, and the planned `0.1.0-unified` GHCR release.
-
 ## Pruning
 
 One command prunes every supported family; it finds the expert weights from
@@ -164,9 +188,23 @@ python -m less_is_moe.intdim.prune \
   --seq_len 2048
 ```
 
-Use `--mode mask` to produce a masked/zeroed checkpoint and `--mode structural`
-to remove the selected units physically; `--prune_mode expert|layer|global`
-selects the scope. Run it with `--help` for the full flag list. The former
+Two dimensions control the result:
+
+| `--prune_mode` | Selection scope | Resulting widths |
+| --- | --- | --- |
+| `expert` (IntDim-E) | Lowest-scoring units inside each expert | Uniform; compacts into a stock checkpoint |
+| `layer` (IntDim-L) | Units pooled across the experts of one layer | Unequal per expert |
+| `global` (IntDim-G) | Units pooled across every layer | Unequal per expert and per layer |
+
+| `--mode` | Output |
+| --- | --- |
+| `mask` | Selected units zeroed, tensor shapes unchanged; loads anywhere |
+| `structural` | Units physically removed; requires `expert` scope; verified with the stock loader |
+| `ragged` | Unequal IntDim-L/G widths stored compactly, served through the vLLM plugin (arrives with #30) |
+
+Run the command with `--help` for the full flag list, including
+`--from_zeroed_model`, the calibration sources (`--calib_data`,
+`--dataset_name`, `--calib_preset`) and `--unwrap_message_content`. The former
 `scripts/prune/*.sh` launchers keep their names and flags for one release and
 forward to this command. Calibration datasets and model weights are not
 distributed in this repository.
@@ -252,18 +290,52 @@ See [quantization notes](docs/QUANTIZATION.md) for the support boundary.
 
 ## Repository layout
 
+Entries marked (#30) arrive with the ragged-expert pull request.
+
 ```text
 src/less_is_moe/
-  pruning/          Pruning implementations
-  model_patches/    Hugging Face and vLLM compatibility patches
-  evaluation/       Zero-shot, OLMoE multi-shot, and optional HF evaluators
-  training/         Base and already-pruned SFT
-  quantization/     AWQ/GPTQ helpers
-scripts/            Thin command-line launchers
-recipes/            Accelerate configs and editable SFT templates
-environments/       Mutually compatible dependency profiles
-third_party/AutoAWQ Vendored compatibility fork (MIT licensed)
+  intdim/                     One pruning implementation for every family
+    discover.py                 Locates expert weights from parameter shapes; resolves
+                                fused vs. per-expert layout, and concatenated vs.
+                                interleaved gate/up rows, by probing the model
+    registry.py                 Config key names and the few layout overrides
+    scoring.py                  Per-unit mean-absolute-gradient scoring helpers
+    prune.py                    CLI: --mode mask|structural|ragged, --prune_mode E|L|G
+    verify.py                   Reloads a pruned checkpoint with stock HF classes
+    ragged.py                   Compact non-uniform checkpoint format (#30)
+    ragged_hf.py                Explicit HF reload classes for that format (#30)
+    ragged_triton.py            BF16 ragged expert GEMMs (#30)
+    ragged_vllm.py              vLLM adapters: TP, PP, replica DP (#30)
+    ragged_plugin.py            Opt-in vLLM architecture registration (#30)
+  calibration.py              Shared calibration loaders: file, HF dataset, presets
+  pruning/                    expert_drop_* baselines (expert granularity, per family)
+  model_patches/              HF and vLLM compatibility for masked / per-layer-expert
+                              checkpoints, plus the vLLM plugin entry point
+  evaluation/                 Strict zero-shot, OLMoE multi-shot, optional HF evaluator
+  training/                   Base and already-pruned SFT
+  quantization/               AWQ/GPTQ helpers
+
+Dockerfile                    Pinned CUDA 13 / PyTorch 2.13 / Transformers 5.17 / vLLM 0.29
+docker/                       Image smoke tests and the release-tag check
+environments/
+  unified/                    Lock for the Docker image
+  legacy/ qwen3/ qwen35/      Original per-family profiles, kept for reproduction
+scripts/
+  prune/                      Deprecated per-family wrappers over the unified CLI
+  evaluate/ train/ quantize/  Thin command-line launchers
+recipes/                      Accelerate configs and editable SFT templates
+tests/
+  legacy_reference/           Retired per-family pruning modules, kept as the
+                              equivalence oracle; not installed, no launchers
+  test_intdim*.py             Discovery, pruning, equivalence and GPU runtime suites
+docs/                         DOCKER, ENVIRONMENTS, SCRIPT_REFERENCE, MIGRATION,
+                              MODEL_PATCHES, RAGGED_EXPERTS (#30), scaling/verification/
+third_party/AutoAWQ           Vendored compatibility fork (MIT licensed)
 ```
+
+The shape of that tree is the point of the refactor: `intdim/` holds the only
+pruning implementation, `pruning/` keeps just the expert-drop baselines, and the
+per-family neuron code that used to live beside them is now a test oracle.
 
 For a start-to-finish checklist, read
 [Reproducibility](docs/REPRODUCIBILITY.md). The
