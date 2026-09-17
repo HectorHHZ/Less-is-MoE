@@ -107,6 +107,9 @@ GPU operations and is a correctness oracle, not the accelerated backend.
 
 ## Reproduce validation
 
+Completed B200 evidence: [four full models, eight L/G cases and 128-token generation](validation/ragged-four-models-b200-2026-09-16.md),
+plus [full-model BF16/FP32 divergence diagnosis](validation/ragged-precision-b200-2026-09-16.md).
+
 One shared full-model harness runs both IntDim-L and IntDim-G at 50%, saves
 both compact checkpoints, verifies exact HF reload, and generates with stock
 zero-mask vLLM and adapted compact vLLM in separate processes:
