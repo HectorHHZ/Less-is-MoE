@@ -13,7 +13,7 @@ from torch import nn
 import vllm
 from vllm.distributed import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
+    tensor_model_parallel_all_reduce, get_pp_group,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm, GemmaRMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -26,7 +26,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import HasInnerState, IsHybrid, SupportsMRoPE, SupportsPP
 from vllm.model_executor.models.utils import (
     extract_layer_index, maybe_prefix, make_layers, make_empty_intermediate_tensors_factory,
-    AutoWeightsLoader, WeightsMapper, is_pp_missing_parameter,
+    AutoWeightsLoader, WeightsMapper, is_pp_missing_parameter, PPMissingLayer,
 )
 
 from .ragged import PackedExperts, validate_metadata, expert_options
@@ -236,7 +236,8 @@ def _init_model(module, vllm_config, prefix, decoder, *, hybrid=False):
     module.start_layer, module.end_layer, module.layers = make_layers(
         config.num_hidden_layers, lambda prefix: decoder(vllm_config, prefix), prefix=f"{prefix}.layers")
     norm = GemmaRMSNorm if hybrid else RMSNorm
-    module.norm = norm(config.hidden_size, eps=config.rms_norm_eps)
+    module.norm = (norm(config.hidden_size, eps=config.rms_norm_eps)
+                   if get_pp_group().is_last_rank else PPMissingLayer())
     module.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
         ["hidden_states", "residual"], config.hidden_size)
     if hybrid:
@@ -266,10 +267,20 @@ class _RaggedCausalLM(nn.Module, SupportsPP):
         self.config = config
         self.quant_config = None
         self.model = model_type(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"), **model_kwargs)
-        self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size, quant_config=None,
-                                      prefix=maybe_prefix(prefix, "lm_head"))
-        if config.tie_word_embeddings:
-            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+        # Some reused upstream models (including GPT-OSS) still construct a
+        # trailing norm on every stage. Their forwards use it only on the last.
+        if not get_pp_group().is_last_rank:
+            self.model.norm = PPMissingLayer()
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size, quant_config=None,
+                                          prefix=maybe_prefix(prefix, "lm_head"))
+            if config.tie_word_embeddings:
+                embedding = getattr(self.model, "embed_tokens", None)
+                if embedding is None:
+                    embedding = self.model.embedding  # GPT-OSS's native name.
+                self.lm_head = self.lm_head.tie_weights(embedding)
+        else:
+            self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
 

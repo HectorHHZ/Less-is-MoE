@@ -124,11 +124,14 @@ model = load_checkpoint("/outputs/qwen-layer")
 ```
 
 vLLM must load the new plugin in every worker. The Docker default disables all
-plugins; explicitly enable only this one for compact checkpoints:
+plugins; select both project entry points because `VLLM_PLUGINS` is an
+allowlist. Keep stock mode to use native models for uniform checkpoints and
+the compact adapters for ragged checkpoints, without legacy model replacement:
 
 ```bash
 docker run --rm --gpus 'device=0' --shm-size=8g -p 8000:8000 \
-  -e VLLM_PLUGINS=less_is_moe_ragged \
+  -e LESS_IS_MOE_RUNTIME_PATCH=stock \
+  -e VLLM_PLUGINS=less_is_moe,less_is_moe_ragged \
   --mount type=bind,src=/absolute/path/outputs,dst=/outputs,readonly \
   less-is-moe:dev-unified \
   vllm serve /outputs/qwen-layer \
@@ -186,7 +189,8 @@ replicas, each split across two GPUs, require **four allocated GPUs**:
 
 ```bash
 docker run --rm --gpus '"device=0,1,2,3"' --shm-size=8g -p 8000:8000 \
-  -e VLLM_PLUGINS=less_is_moe_ragged \
+  -e LESS_IS_MOE_RUNTIME_PATCH=stock \
+  -e VLLM_PLUGINS=less_is_moe,less_is_moe_ragged \
   --mount type=bind,src=/absolute/path/outputs,dst=/outputs,readonly \
   less-is-moe:dev-unified \
   vllm serve /outputs/qwen-layer \

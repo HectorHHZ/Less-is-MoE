@@ -65,7 +65,17 @@ def validate_family(config):
 
 
 def original_width(config):
-    return config.intermediate_size if config.model_type in ("olmoe", "gpt_oss") else config.moe_intermediate_size
+    if config.model_type in ("olmoe", "gpt_oss"):
+        width = getattr(config, "intermediate_size", None)
+    elif config.model_type == "gemma4_text":
+        width = getattr(config, "moe_intermediate_size", None)
+        if width is None:
+            width = getattr(config, "expert_intermediate_size", None)
+    else:
+        width = getattr(config, "moe_intermediate_size", None)
+    if type(width) is not int or width <= 0:
+        raise ValueError(f"{config.model_type}: missing or invalid original expert intermediate size")
+    return width
 
 
 def validate_metadata(config) -> dict[str, list[int]]:
