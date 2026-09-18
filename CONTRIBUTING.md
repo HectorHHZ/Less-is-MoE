@@ -127,17 +127,19 @@ report the command and result in the pull request.
 A new MoE family is the most common substantial contribution. It usually needs
 all of the following in the same pull request:
 
-1. **Pruning.** Add `neuron_drop_<family>.py` and
-   `neuron_structure_drop_<family>.py` under `src/less_is_moe/pruning/`,
-   following the closest existing family. State whether shared experts are
-   preserved.
+1. **Pruning.** Usually nothing to write: `less_is_moe.intdim.discover` finds
+   the expert weights from parameter shapes. Confirm it resolves the family,
+   and add an entry to `intdim/registry.py` only when shapes cannot settle the
+   layout or the config key names are unusual. State whether shared experts are
+   preserved. Do not add per-family pruning modules; they were retired in #25.
 2. **Runtime patches.** Structurally pruned checkpoints have layer-wise expert
    dimensions that stock implementations do not understand. Add the Hugging
    Face and vLLM patches under `src/less_is_moe/model_patches/` and register
    the family in `registry.py`. Detection must read the checkpoint
    configuration, not the directory name. See [model patches](docs/MODEL_PATCHES.md).
-3. **Launchers.** Add thin wrappers under `scripts/prune/` that forward their
-   arguments to the package module, matching the existing launchers.
+3. **Launchers.** None needed: `python -m less_is_moe.intdim.prune` already
+   covers every discovered family. The wrappers under `scripts/prune/` exist
+   only to keep the retired per-family names working for one release.
 4. **Environment.** Reuse a profile if its pins already support the family.
    Otherwise add a new profile instead of changing an existing one.
 5. **Evaluation.** Say which protocol the family uses and why.

@@ -47,8 +47,8 @@ def _reference_scripts(model, family):
         if suffix is None:
             return None
     return (
-        importlib.import_module(f"less_is_moe.pruning.neuron_drop_{suffix}"),
-        importlib.import_module(f"less_is_moe.pruning.neuron_structure_drop_{suffix}"),
+        importlib.import_module(f"legacy_reference.neuron_drop_{suffix}"),
+        importlib.import_module(f"legacy_reference.neuron_structure_drop_{suffix}"),
     )
 
 
@@ -71,6 +71,26 @@ def _assert_same_scores(old, new):
         assert list(old[layer]) == list(new[layer])
         for e in old[layer]:
             assert torch.equal(old[layer][e], new[layer][e]), (layer, e)
+
+
+# ------------------------------------------------------------ oracle wiring
+
+ORACLE_MODULES = [f"neuron_drop_{f}" for f in ("qwen15_moe", "qwen3", "qwen3_5", "olmoe", "gpt_oss", "gemma4")] + \
+                 [f"neuron_structure_drop_{f}" for f in ("qwen15_moe", "qwen3", "qwen3_5", "olmoe")]
+
+
+def test_retired_modules_live_only_in_the_test_oracle():
+    """The per-family implementations are the equivalence oracle, not shipped code.
+
+    Runs on CPU so a rename breaks here rather than only on a GPU machine, where
+    the equivalence suite that imports them actually executes.
+    """
+    for name in ORACLE_MODULES:
+        oracle = importlib.import_module(f"legacy_reference.{name}")
+        entry = "structurally_remove_neurons" if name.startswith("neuron_structure") else "collect_neuron_gradient_scores"
+        assert hasattr(oracle, entry), f"{name} lost {entry}"
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(f"less_is_moe.pruning.{name}")
 
 
 # ------------------------------------------------------------ equivalence

@@ -6,20 +6,26 @@ entry points remain in the release. For the old-to-new path mapping, see
 
 ## Neuron pruning
 
-All eight neuron-pruning entry points estimate one score per routed-expert FFN
-neuron from calibration-language-model loss:
+One command prunes every supported family:
+
+```bash
+python -m less_is_moe.intdim.prune --mode mask|structural --prune_mode expert|layer|global
+```
+
+It estimates one score per routed-expert FFN neuron from the calibration
+language-model loss:
 
 ```text
 score[j] = mean(abs(gradient slices for gate[j], up[j], and down[:, j]))
 ```
 
-Despite the historical `pure_gradient` naming in helper functions, this is
+Despite the historical `pure_gradient` naming in the retired modules, this is
 mean absolute gradient, not squared-gradient Fisher information. Shared experts
 are left unchanged.
 
-The four `neuron_drop_*` modules keep every tensor shape unchanged and zero the
-selected `gate_proj`/`up_proj` rows and matching `down_proj` columns. Each has
-three selection scopes:
+`--mode mask` keeps every tensor shape unchanged and zeroes the selected
+`gate_proj`/`up_proj` rows and matching `down_proj` columns. Three selection
+scopes are available:
 
 - `expert`: rank independently inside each expert. Every expert loses the same
   number of neurons, so the result can later be structurally compacted.
@@ -28,26 +34,40 @@ three selection scopes:
 - `global`: rank across all routed experts and layers. Both per-expert and
   per-layer counts may differ, so this is also zero-mask-only.
 
-The four `neuron_structure_drop_*` modules physically replace expert
-projections with smaller linear layers. They can either score a base checkpoint
-directly with `--drop_ratio`, or compact a compatible masked checkpoint with
-`--from_zeroed_model`. Structural compaction requires one uniform surviving
-width; the scripts reject layer/global masks instead of writing an unloadable
-checkpoint.
+`--mode structural` physically replaces expert projections with smaller ones.
+It can either score a base checkpoint directly with `--drop_ratio`, or compact
+a compatible masked checkpoint with `--from_zeroed_model`. Structural
+compaction requires one uniform surviving width; layer and global masks are
+rejected instead of writing an unloadable checkpoint. The saved checkpoint is
+verified with the stock Transformers loader unless `--skip_verify` is passed.
 
-The newer unified command `python -m less_is_moe.intdim.prune --mode ragged`
-can compact non-uniform Qwen1.5-MoE, OLMoE, Qwen3-MoE, Qwen3.5-MoE, GPT-OSS and Gemma4 text
-layer/global plans using a dedicated checkpoint
-format and vLLM plugin. See [ragged expert support](RAGGED_EXPERTS.md) for its
-GPU-only scope and loader requirements; this does not change the legacy
-per-family scripts described above.
+Family-specific behavior that the shared implementation preserves:
 
-| Family | Mask module | Structural module | Family-specific behavior |
-| --- | --- | --- | --- |
-| Qwen1.5/Qwen2-MoE | `neuron_drop_qwen15_moe` | `neuron_structure_drop_qwen15_moe` | Routed experts only; the shared expert is preserved. |
-| Qwen3-MoE | `neuron_drop_qwen3` | `neuron_structure_drop_qwen3` | ModuleList routed experts; no shared expert in the target model. |
-| Qwen3.5-MoE | `neuron_drop_qwen3_5` | `neuron_structure_drop_qwen3_5` | Handles the Transformers 5 batched-expert layout and legacy ModuleList layout; use the `qwen35` environment. |
-| OLMoE | `neuron_drop_olmoe` | `neuron_structure_drop_olmoe` | Routed experts only; no shared expert in the target model. |
+| Family | Behavior |
+| --- | --- |
+| Qwen1.5/Qwen2-MoE | Routed experts only; the shared expert is preserved. |
+| Qwen3-MoE | No shared expert in the target model. |
+| Qwen3.5-MoE | Handles the Transformers 5 batched-expert layout and the legacy ModuleList layout. |
+| OLMoE | Routed experts only; no shared expert in the target model. |
+| gpt-oss | Interleaved gate/up rows with biases; the bias entries of dropped units are zeroed with their rows. |
+| Gemma-4 | GeGLU experts; the parallel dense MLP is not pruned. |
+
+`--unwrap_message_content` (default on) reproduces the Qwen3/Qwen3.5 handling
+of chat-message fields in Hugging Face datasets;
+`--no-unwrap_message_content` reproduces the Qwen1.5-MoE and OLMoE handling.
+The deprecated launchers under `scripts/prune/` pass the value their family
+used.
+
+`--mode ragged --prune_mode layer|global` compacts non-uniform layer/global
+plans for Qwen1.5-MoE, OLMoE, Qwen3-MoE, Qwen3.5-MoE, GPT-OSS and Gemma4 text
+models into a dedicated checkpoint format served by an opt-in vLLM plugin.
+Unlike `--mode structural`, its output does not load with stock classes. See
+[ragged expert support](RAGGED_EXPERTS.md) for its GPU-only scope and loader
+requirements.
+
+The ten retired per-family modules now live in `tests/legacy_reference/`. They
+are not installed and have no launchers; the equivalence suite runs them as the
+oracle for the shared implementation. See [Migration](MIGRATION.md).
 
 Every implementation accepts a local JSON/JSONL calibration file or a Hugging
 Face dataset. Qwen1.5 and OLMoE also retain the `ceval`, `math`, and `cmmlu`

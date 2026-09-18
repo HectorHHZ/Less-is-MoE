@@ -1,17 +1,16 @@
 """
-Neuron-level drop for Qwen3-MoE (Qwen3-30B-A3B and similar variants).
+Neuron-level drop for OLMoE-1B-7B.
 
 Strategy — runtime masking via weight zeroing (shapes preserved):
     For each routed expert in each MoE layer, rank every FFN neuron by
     gradient importance and zero out the bottom `drop_ratio` fraction.
 
     For neuron index j the zeroed triplet is:
-        gate_proj.weight[j, :] = 0      # shape (moe_intermediate_size, hidden)
-        up_proj.weight[j, :]   = 0      # shape (moe_intermediate_size, hidden)
-        down_proj.weight[:, j] = 0      # shape (hidden, moe_intermediate_size)
+        gate_proj.weight[j, :] = 0      # shape (d_ffn, hidden_size)
+        up_proj.weight[j, :]   = 0      # shape (d_ffn, hidden_size)
+        down_proj.weight[:, j] = 0      # shape (hidden_size, d_ffn)
 
-    Qwen3-MoE has no shared_expert (vs Qwen1.5-MoE); only routed experts are
-    modified.
+    OLMoE has no shared_expert; only routed experts exist and are modified.
 
 Importance metric (mirrors pure_gradient_pruning at neuron granularity):
 
@@ -23,26 +22,14 @@ Importance metric (mirrors pure_gradient_pruning at neuron granularity):
 
     averaged across calibration samples with L = LM cross-entropy loss.
 
-Three selection modes (via ``--prune_mode``):
-
-    expert  per-expert independent bottom-k. Uniform per-expert drop count
-            -> structurally-shrink compatible.
-    layer   pool every neuron in a MoE layer across experts -> per-expert
-            count varies; zero-mask only.
-    global  pool every neuron across the whole model -> per-layer and
-            per-expert count varies; zero-mask only.
-
 Usage:
-    scripts/prune/neuron_drop_qwen3.sh \\
-        --model_name_or_path Qwen/Qwen3-30B-A3B \\
+    scripts/prune/neuron_drop_olmoe.sh \\
+        --model_name_or_path allenai/OLMoE-1B-7B \\
         --output_dir /path/to/pruned_model \\
-        --prune_mode global \\
-        --drop_ratio 0.50 \\
+        --drop_ratio 0.25 \\
         --n_samples 128 \\
         --seq_len 2048 \\
-        --dataset_name HectorHe/math7k \\
-        --dataset_split train \\
-        --text_column instruction,output \\
+        --calib_data /path/to/c4_train_part_of_0.json \\
         --dtype bf16
 """
 
@@ -57,14 +44,15 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 # ---------------------------------------------------------------------------
-# Reuse calibration loaders & MoE utilities from expert_drop_qwen3.py
+# Reuse calibration loaders & MoE utilities from expert_drop_olmoe.py
 # ---------------------------------------------------------------------------
 
-from .expert_drop_qwen3 import (
+from less_is_moe.pruning.expert_drop_olmoe import (
     get_moe_block,
     get_moe_layer_info,
     load_calib_data,
     load_calib_data_hf,
+    load_calib_data_preset,
 )
 
 
@@ -77,7 +65,7 @@ def collect_neuron_gradient_scores(model, calib_batches, moe_layer_indices):
 
     Returns
     -------
-    dict  {layer_idx: {expert_idx: Tensor of shape (moe_intermediate_size,)}}
+    dict  {layer_idx: {expert_idx: Tensor of shape (d_ffn,)}}
     """
     device = next(model.parameters()).device
 
@@ -96,24 +84,22 @@ def collect_neuron_gradient_scores(model, calib_batches, moe_layer_indices):
             expert.down_proj.weight.requires_grad_(True)
             expert_projs[layer_idx].append((
                 eid,
-                expert.gate_proj.weight,
-                expert.up_proj.weight,
-                expert.down_proj.weight,
+                expert.gate_proj.weight,   # (d_ffn, hidden_size)
+                expert.up_proj.weight,      # (d_ffn, hidden_size)
+                expert.down_proj.weight,    # (hidden_size, d_ffn)
             ))
 
-    # Initialize accumulators
     scores = {}
     for layer_idx, experts in expert_projs.items():
         scores[layer_idx] = {}
-        for eid, gate_w, _, _ in experts:
+        for eid, gate_w, _up_w, _down_w in experts:
             scores[layer_idx][eid] = torch.zeros(gate_w.shape[0], dtype=torch.float32)
 
     model.train()
     for batch in tqdm(calib_batches, desc="Collecting neuron gradient scores"):
         input_ids = batch.to(device)
         outputs = model(input_ids, labels=input_ids)
-        loss = outputs.loss
-        loss.backward()
+        outputs.loss.backward()
 
         for layer_idx, experts in expert_projs.items():
             for eid, gate_w, up_w, down_w in experts:
@@ -150,14 +136,18 @@ def collect_neuron_gradient_scores(model, calib_batches, moe_layer_indices):
 
 
 # ---------------------------------------------------------------------------
-# Decision functions — three selection modes
+# Decision
 # ---------------------------------------------------------------------------
 
 def decide_neurons_to_drop(scores, drop_ratio):
     """Expert-wise selection (default).
 
     For each (layer, expert) independently drop the bottom ``drop_ratio``
-    fraction. Uniform per-expert drop count -> structural-shrink compatible.
+    fraction. Every expert in a layer drops the same count, so the resulting
+    d_ffn is uniform across experts — the only mode compatible with structural
+    shrink.
+
+    Returns dict  {layer_idx: {expert_idx: sorted list of neuron indices to drop}}.
     """
     drop_per_layer = {}
     for layer_idx, expert_scores in scores.items():
@@ -179,8 +169,13 @@ def decide_neurons_to_drop_layerwise(scores, drop_ratio):
     """Layer-wise selection.
 
     Pool every neuron in a given MoE layer across all routed experts, then
-    drop the bottom ``drop_ratio`` fraction within that layer. Per-expert
-    counts vary; zero-mask compatible only.
+    drop the bottom ``drop_ratio`` fraction within that layer. Same total
+    budget per layer as the expert-wise mode, but the per-expert split is
+    free — an expert with uniformly-important neurons keeps everything,
+    while a low-scoring expert may lose more than ``drop_ratio × d_ffn``.
+
+    Only meaningful under the zero-mask variant: the resulting d_ffn is no
+    longer uniform across experts, so structural shrink cannot use it.
     """
     drop_per_layer = {}
     for layer_idx, expert_scores in scores.items():
@@ -209,7 +204,7 @@ def decide_neurons_to_drop_global(scores, drop_ratio):
 
     Pool every neuron across **every MoE layer and every routed expert**, then
     drop the bottom ``drop_ratio`` fraction. Both per-layer and per-expert
-    drop counts vary; zero-mask only.
+    drop counts can vary. Only zero-mask compatible.
     """
     flat = [
         (float(s), layer_idx, eid, j)
@@ -272,7 +267,7 @@ def _summarize_drop_distribution(drop_per_layer):
 
 
 # ---------------------------------------------------------------------------
-# In-place weight zeroing (shapes preserved -> vLLM/HF load unchanged)
+# In-place weight zeroing
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
@@ -328,7 +323,7 @@ def zero_dropped_neurons(model, drop_per_layer, moe_layer_indices):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Neuron-level drop for Qwen3-MoE (zero-mask)"
+        description="Neuron-level drop for OLMoE (runtime masking via weight zeroing)"
     )
     parser.add_argument("--model_name_or_path", type=str, required=True)
     parser.add_argument("--output_dir", type=str, required=True)
@@ -347,6 +342,9 @@ def main():
     parser.add_argument("--dataset_config", type=str, default=None)
     parser.add_argument("--dataset_split", type=str, default="train")
     parser.add_argument("--text_column", type=str, default="prompt")
+    parser.add_argument("--calib_preset", type=str, default=None,
+                        choices=["ceval", "math", "cmmlu"])
+    parser.add_argument("--calib_preset_split", type=str, default=None)
     parser.add_argument("--shuffle_seed", type=int, default=None)
     parser.add_argument("--dtype", type=str, default="bf16",
                         choices=["bf16", "fp16", "fp32"])
@@ -369,7 +367,13 @@ def main():
     model.eval()
 
     # ---- calibration data ----
-    if args.dataset_name:
+    if args.calib_preset:
+        print(f"Loading calibration data from preset: {args.calib_preset} ...")
+        calib_batches = load_calib_data_preset(
+            tokenizer, args.calib_preset, args.n_samples, args.seq_len,
+            split=args.calib_preset_split, shuffle_seed=args.shuffle_seed,
+        )
+    elif args.dataset_name:
         print(f"Loading calibration data from HF dataset: {args.dataset_name} ...")
         calib_batches = load_calib_data_hf(
             tokenizer, args.dataset_name, args.dataset_config, args.dataset_split,
@@ -378,7 +382,7 @@ def main():
         )
     else:
         if not args.calib_data:
-            raise ValueError("Must provide one of --dataset_name / --calib_data")
+            raise ValueError("Must provide one of --calib_preset / --dataset_name / --calib_data")
         print(f"Loading calibration data from {args.calib_data} ...")
         calib_batches = load_calib_data(tokenizer, args.calib_data, args.n_samples, args.seq_len)
     print(f"Loaded {len(calib_batches)} calibration samples (seq_len={args.seq_len})")
@@ -390,9 +394,9 @@ def main():
 
     first_moe = get_moe_block(model.model.layers[moe_layer_indices[0]])
     d_ffn = first_moe.experts[0].gate_proj.weight.shape[0]
-    n_drop_target = int(d_ffn * args.drop_ratio)
-    print(f"Expert FFN dimension (moe_intermediate_size): {d_ffn}")
-    print(f"Target neurons to drop per expert: {n_drop_target} ({args.drop_ratio*100:.0f}%)")
+    n_drop = int(d_ffn * args.drop_ratio)
+    print(f"Expert FFN dimension (d_ffn): {d_ffn}")
+    print(f"Neurons to drop per expert: {n_drop} ({args.drop_ratio*100:.0f}%)")
 
     # ---- score collection ----
     print(f"Collecting per-neuron gradient scores over {len(calib_batches)} samples ...")
@@ -438,12 +442,13 @@ def main():
             "drop_ratio": args.drop_ratio,
             "drop_pct": drop_pct,
             "d_ffn": d_ffn,
-            "neurons_dropped_per_expert_target": n_drop_target,
+            "neurons_dropped_per_expert_target": n_drop,
             "total_neurons": total_neurons,
             "total_dropped": total_dropped,
             "n_samples": args.n_samples,
             "seq_len": args.seq_len,
             "dataset_name": args.dataset_name,
+            "calib_preset": args.calib_preset,
             "calib_data": args.calib_data,
             "text_column": args.text_column,
             "per_layer": drop_summary,
