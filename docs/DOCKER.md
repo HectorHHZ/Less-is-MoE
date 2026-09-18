@@ -208,6 +208,28 @@ python -m less_is_moe.intdim.prune \
 ```
 
 `--mode mask --prune_mode expert|layer|global` supports E/L/G zero-masking.
+
+For Qwen1.5-MoE, OLMoE, Qwen3-MoE, Qwen3.5-MoE, GPT-OSS and Gemma4 text models,
+`--mode ragged --prune_mode layer|global` adds a separate compact
+non-uniform format. Its vLLM backend requires
+`VLLM_PLUGINS=less_is_moe,less_is_moe_ragged`,
+`LESS_IS_MOE_RUNTIME_PATCH=stock`, BF16 and eager execution. `VLLM_PLUGINS`
+is an allowlist: listing only the ragged plugin disables the existing plugin.
+The stock setting keeps legacy model replacement disabled even when both
+plugins are discovered. In pinned vLLM 0.29.0, native Qwen3.5 architectures
+already have the text/SSM configuration fixups; the ragged plugin registers
+the same upstream fixups for its new architecture name, preserving FP32
+recurrent state when requested by the checkpoint. This plugin selection can
+also serve uniform-width structural checkpoints in the same image.
+Tensor parallelism shards each expert's retained width, and pipeline parallelism can
+partition whole layers across GPUs. Native data-parallel serving replicates
+the compact model, with optional TP inside each replica. For example,
+`--data-parallel-size 2 --tensor-parallel-size 2` requires four visible GPUs.
+Batch size follows vLLM's per-replica scheduler limits.
+GPT-OSS's published MXFP4
+weights are dequantized to BF16 before pruning. The existing root Dockerfile
+packages the implementation and plugin with the same dependency lock. See
+[ragged expert support](RAGGED_EXPERTS.md); stock runtime defaults stay the same.
 `--mode structural --from_zeroed_model` compacts a uniformly zero-masked
 checkpoint without calibration. Empty calibration for scoring is rejected.
 

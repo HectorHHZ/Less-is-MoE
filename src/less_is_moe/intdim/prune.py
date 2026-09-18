@@ -13,8 +13,8 @@ The importance criterion, selection scopes, and outputs are unchanged:
 * **Select.** ``expert`` (IntDim-E) drops the same number of lowest-scoring units
   in every expert; ``layer`` (IntDim-L) pools units across the experts of a layer;
   ``global`` (IntDim-G) pools units across all layers.
-* **Apply.** ``mask`` zeroes the selected units and keeps tensor shapes;
-  ``structural`` removes them, which requires the ``expert`` scope.
+* **Apply.** ``mask`` keeps tensor shapes; ``structural`` removes equal counts
+  with stock loaders; ``ragged`` exports unequal MoE widths for our GPU plugin.
 
 The arithmetic follows the per-family scripts operation for operation, including
 where each reduction runs, so scores and outputs match them exactly.
@@ -386,8 +386,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model_name_or_path", required=True)
     parser.add_argument("--output_dir", required=True)
-    parser.add_argument("--mode", choices=("mask", "structural"), required=True,
-                        help="mask: zero units and keep shapes (neuron_drop_*); structural: remove units (neuron_structure_drop_*)")
+    parser.add_argument("--mode", choices=("mask", "structural", "ragged"), required=True,
+                        help="mask: zero units; structural: uniform stock-loader checkpoint; ragged: compact MoE GPU plugin checkpoint")
     parser.add_argument("--prune_mode", choices=PRUNE_MODES, default="expert",
                         help="Selection scope: expert (IntDim-E), layer (IntDim-L), global (IntDim-G). Structural mode requires expert.")
     parser.add_argument("--drop_ratio", type=float, default=None, help="Fraction of units to drop, in (0, 1)")
@@ -407,7 +407,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Use only the content of chat-message dict fields in HF datasets (Qwen3/Qwen3.5 script behavior). "
                              "The Qwen1.5-MoE and OLMoE scripts correspond to --no-unwrap_message_content.")
     parser.add_argument("--dtype", choices=("bf16", "fp16", "fp32"), default="bf16")
-    parser.add_argument("--skip_verify", action="store_true", help="Structural mode: skip the stock-loader verification")
+    parser.add_argument("--skip_verify", action="store_true", help="Skip checkpoint reload verification (stock for structural, custom GPU loader for ragged)")
     return parser
 
 
@@ -423,6 +423,12 @@ def validate_args(args: argparse.Namespace) -> None:
 def prune(model: nn.Module, args: argparse.Namespace, calib_batches: Iterable[torch.Tensor] | None) -> dict[str, Any]:
     """Run the full pipeline on a loaded model and return the summary (weights are modified in place)."""
     validate_args(args)
+    if args.mode == "ragged":
+        from .ragged import validate_family
+        # Fail before expensive calibration for unsupported model families.
+        validate_family(model.config)
+        if any(p.device.type != "cuda" for p in model.parameters()):
+            raise ValueError("Ragged pruning requires the entire model on GPU")
     batches = None if args.from_zeroed_model else list(calib_batches or [])
     if batches is not None and not batches:
         raise ValueError("Calibration batches must not be empty")
@@ -467,6 +473,13 @@ def prune(model: nn.Module, args: argparse.Namespace, calib_batches: Iterable[to
             "per_layer": per_layer,
         }
 
+    if args.mode == "ragged":
+        from .ragged import compact_model
+        summary = compact_model(model, handles, drop_per_layer)
+        return {**summary, **common, "method": "ragged_neuron_structure_drop",
+                "prune_mode": args.prune_mode, "drop_ratio": args.drop_ratio,
+                "source_model": args.model_name_or_path, "drop_plan": drop_per_layer}
+
     per_layer, total_dropped, total_neurons, new_d_ffn = structurally_remove_neurons(handles, drop_per_layer)
     handles[0].intermediate_size_key.set(model.config, new_d_ffn)
     return {
@@ -495,7 +508,11 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Loading model from {args.model_name_or_path} ...")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, trust_remote_code=True)
-    model = load_model(args.model_name_or_path, dtype)
+    if args.mode == "ragged":
+        from .ragged_hf import load_source_model
+        model = load_source_model(args.model_name_or_path, dtype=dtype, experts_implementation="eager")
+    else:
+        model = load_model(args.model_name_or_path, dtype)
     model.eval()
     batches = None if args.from_zeroed_model else load_calibration(args, tokenizer)
     if batches is not None:
@@ -504,8 +521,12 @@ def main(argv: list[str] | None = None) -> int:
     summary = prune(model, args, batches)
 
     os.makedirs(args.output_dir, exist_ok=True)
-    model.save_pretrained(args.output_dir)
-    tokenizer.save_pretrained(args.output_dir)
+    if args.mode == "ragged":
+        from .ragged import save_checkpoint
+        save_checkpoint(model, args.output_dir, tokenizer)
+    else:
+        model.save_pretrained(args.output_dir)
+        tokenizer.save_pretrained(args.output_dir)
 
     if args.mode == "structural" and not args.skip_verify:
         from .verify import verify_checkpoint
@@ -515,6 +536,21 @@ def main(argv: list[str] | None = None) -> int:
         summary["stock_load_verified"] = report.ok
         if not report.ok:
             raise RuntimeError(f"Pruned checkpoint does not load with stock classes:\n{report}")
+
+    if args.mode == "ragged" and not args.skip_verify:
+        import gc
+        from .ragged import load_checkpoint
+        # Release the pruning model before verifying a full-size GPU reload.
+        del model
+        gc.collect()
+        torch.cuda.empty_cache()
+        restored = load_checkpoint(args.output_dir, dtype=dtype)
+        with torch.inference_mode():
+            token = restored.config.bos_token_id or 0
+            output = restored(torch.tensor([[token, token]], device="cuda"), use_cache=False).logits
+            if not torch.isfinite(output).all():
+                raise RuntimeError("Ragged checkpoint reload produced non-finite logits")
+        summary["ragged_load_verified"] = True
 
     summary_file = MASK_SUMMARY_FILE if args.mode == "mask" else STRUCTURAL_SUMMARY_FILE
     with open(os.path.join(args.output_dir, summary_file), "w") as f:

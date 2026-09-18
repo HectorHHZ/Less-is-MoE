@@ -58,6 +58,13 @@ of chat-message fields in Hugging Face datasets;
 The deprecated launchers under `scripts/prune/` pass the value their family
 used.
 
+`--mode ragged --prune_mode layer|global` compacts non-uniform layer/global
+plans for Qwen1.5-MoE, OLMoE, Qwen3-MoE, Qwen3.5-MoE, GPT-OSS and Gemma4 text
+models into a dedicated checkpoint format served by an opt-in vLLM plugin.
+Unlike `--mode structural`, its output does not load with stock classes. See
+[ragged expert support](RAGGED_EXPERTS.md) for its GPU-only scope and loader
+requirements.
+
 The ten retired per-family modules now live in `tests/legacy_reference/`. They
 are not installed and have no launchers; the equivalence suite runs them as the
 oracle for the shared implementation. See [Migration](MIGRATION.md).

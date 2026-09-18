@@ -1,0 +1,503 @@
+"""Shared ragged expert kernels and vLLM 0.29.0 model adapters.
+
+GPU BF16, tensor/layer pipeline parallelism, replica data parallelism, eager. Upstream attention,
+decoder/model forwards, weight mappings and hybrid-cache methods are reused
+without global patches.
+No stock FusedMoE or rectangular routed-expert weights are instantiated.
+"""
+
+from functools import partial
+
+import torch
+from torch import nn
+import vllm
+from vllm.distributed import (
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce, get_pp_group,
+)
+from vllm.model_executor.layers.layernorm import RMSNorm, GemmaRMSNorm
+from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
+from vllm.model_executor.models import qwen2_moe as q2, qwen3_moe as q3, olmoe as ol
+from vllm.model_executor.models import qwen3_5 as q35
+from vllm.model_executor.models import gpt_oss as gpt, gemma4 as g4
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.interfaces import HasInnerState, IsHybrid, SupportsMRoPE, SupportsPP
+from vllm.model_executor.models.utils import (
+    extract_layer_index, maybe_prefix, make_layers, make_empty_intermediate_tensors_factory,
+    AutoWeightsLoader, WeightsMapper, is_pp_missing_parameter, PPMissingLayer,
+)
+
+from .ragged import PackedExperts, validate_metadata, expert_options
+from .ragged_triton import ragged_experts
+
+
+def _validate(vllm_config):
+    if vllm.__version__ != "0.29.0":
+        raise ValueError("Ragged v1 is pinned to vLLM 0.29.0")
+    pc, mc = vllm_config.parallel_config, vllm_config.model_config
+    # Native vLLM DP engines each own a complete compact model, optionally
+    # sharded within their TP group. No expert weights or activations are
+    # distributed across DP replicas; vLLM owns request/wave coordination.
+    if pc.enable_expert_parallel or pc.enable_eplb or getattr(pc, "use_sequence_parallel_moe", False):
+        raise ValueError("Ragged v1 does not support expert/sequence parallelism or EPLB")
+    if mc.dtype != torch.bfloat16 or not mc.enforce_eager:
+        raise ValueError("Ragged v1 requires BF16 and enforce_eager=True")
+    if vllm_config.quant_config is not None or vllm_config.lora_config is not None or vllm_config.speculative_config is not None:
+        raise ValueError("Ragged v1 does not support quantization, LoRA or speculative decoding")
+    config = mc.hf_text_config
+    validate_metadata(config)
+    tp_size = pc.tensor_parallel_size
+    # These pinned upstream attention implementations assume partitioned KV
+    # heads (OLMoE gathers K for its norm; GPT-OSS divides its KV size directly).
+    if config.model_type in ("olmoe", "gpt_oss") and config.num_key_value_heads % tp_size:
+        raise ValueError(f"{config.model_type} with vLLM 0.29.0 requires TP to divide "
+                         "num_key_value_heads; replicated KV heads are unsupported")
+    if getattr(config, "dual_chunk_attention_config", None):
+        raise ValueError("Dual-chunk attention is not supported by ragged v1")
+    return config
+
+
+class TensorParallelPackedExperts(PackedExperts):
+    """Shard each compact expert along its retained intermediate dimension.
+
+    Checkpoint widths remain global and independent of TP. Floor boundaries
+    partition odd and zero widths without padding, overlap or lost neurons.
+    The local gate/up rows and down columns always use the same interval.
+    These are TP-group ranks, never global or DP*TP ranks: every DP replica
+    retains all experts and contributes down biases once within its own group.
+    """
+
+    def __init__(self, widths, hidden_size, **kwargs):
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.global_widths = tuple(widths)
+        self.local_ranges = tuple((w * self.tp_rank // self.tp_size,
+                                   w * (self.tp_rank + 1) // self.tp_size) for w in widths)
+        super().__init__([end - start for start, end in self.local_ranges], hidden_size, **kwargs)
+        # AutoWeightsLoader uses these loaders for flat compact parameters.
+        for name, parameter in self.named_parameters(recurse=False):
+            parameter.weight_loader = partial(self._load_weight, name=name)
+
+    @torch.no_grad()
+    def _load_weight(self, parameter, loaded_weight, *, name):
+        hidden = self.hidden_size
+        if name == "down_proj_bias":
+            if tuple(loaded_weight.shape) != (len(self.widths), hidden):
+                raise ValueError("Invalid compact down bias shape")
+            # A down bias belongs to the complete expert, not to each shard.
+            # Rank zero contributes it once, including for zero-width experts.
+            if self.tp_rank == 0:
+                parameter.copy_(loaded_weight)
+            else:
+                parameter.zero_()
+            return
+        stride = {"gate_up_proj": 2 * hidden, "down_proj": hidden,
+                  "gate_up_proj_bias": 2}[name]
+        if tuple(loaded_weight.shape) != (sum(self.global_widths) * stride,):
+            raise ValueError(f"Invalid compact {name} shape")
+        source_offset = 0
+        for expert, (width, (start, end)) in enumerate(zip(self.global_widths, self.local_ranges)):
+            local_width = end - start
+            source = loaded_weight.narrow(0, source_offset * stride, width * stride)
+            target = parameter.narrow(0, self.offsets[expert] * stride, local_width * stride)
+            if name == "gate_up_proj":
+                source, target = source.view(2, width, hidden), target.view(2, local_width, hidden)
+                target.copy_(source[:, start:end, :])
+            elif name == "down_proj":
+                target.view(hidden, local_width).copy_(source.view(hidden, width)[:, start:end])
+            else:
+                target.view(2, local_width).copy_(source.view(2, width)[:, start:end])
+            source_offset += width
+
+
+class RaggedMLP(nn.Module):
+    """Shared routed experts; retain each family's routing and shared branch."""
+    def __init__(self, config, widths, prefix):
+        super().__init__()
+        self.top_k = config.num_experts_per_tok
+        self.renormalize = getattr(config, "norm_topk_prob", True)
+        self.gate = ReplicatedLinear(config.hidden_size, config.num_experts, bias=False,
+                                     quant_config=None, prefix=f"{prefix}.gate")
+        self.experts = TensorParallelPackedExperts(widths, config.hidden_size)
+        self.register_buffer("widths", torch.tensor(self.experts.widths, dtype=torch.int32), persistent=False)
+        self.register_buffer("offsets", torch.tensor(self.experts.offsets, dtype=torch.int64), persistent=False)
+        self.max_width = max(self.experts.widths)
+        shared_width = getattr(config, "shared_expert_intermediate_size", 0)
+        self.shared_expert = None
+        if shared_width:
+            self.shared_expert_gate = ReplicatedLinear(config.hidden_size, 1, bias=False,
+                                                       quant_config=None, prefix=f"{prefix}.shared_expert_gate")
+            self.shared_expert = q2.Qwen2MoeMLP(
+                hidden_size=config.hidden_size, intermediate_size=shared_width,
+                hidden_act=config.hidden_act, quant_config=None,
+                expert_gate=self.shared_expert_gate, prefix=f"{prefix}.shared_expert")
+
+    def forward(self, hidden_states):
+        shape = hidden_states.shape
+        hidden = hidden_states.reshape(-1, shape[-1])
+        logits, _ = self.gate(hidden)
+        probabilities = torch.softmax(logits, dim=-1, dtype=torch.float32)
+        weights, ids = torch.topk(probabilities, self.top_k, dim=-1)
+        if self.renormalize:
+            weights = weights / weights.sum(dim=-1, keepdim=True)
+        result = _run_packed(self, hidden, ids, weights.to(hidden.dtype))
+        if self.shared_expert is not None:
+            result = result + self.shared_expert(hidden)
+        return result.reshape(shape)
+
+
+def _mlp(config, prefix):
+    layer = extract_layer_index(prefix)
+    return RaggedMLP(config, config.less_is_moe["expert_intermediate_sizes"][str(layer)], f"{prefix}.mlp")
+
+
+class RaggedDecoderLayer(q3.Qwen3MoeDecoderLayer):
+    def __init__(self, vllm_config, prefix=""):
+        nn.Module.__init__(self)
+        config = vllm_config.model_config.hf_text_config
+        self.hidden_size = config.hidden_size
+        self.self_attn = q3.Qwen3MoeAttention(
+            hidden_size=config.hidden_size, num_heads=config.num_attention_heads,
+            num_kv_heads=config.num_key_value_heads, rope_parameters=config.rope_parameters,
+            max_position_embeddings=config.max_position_embeddings, rms_norm_eps=config.rms_norm_eps,
+            qkv_bias=getattr(config, "attention_bias", False), head_dim=getattr(config, "head_dim", None),
+            cache_config=vllm_config.cache_config, quant_config=None, prefix=f"{prefix}.self_attn")
+        self.mlp = _mlp(config, prefix)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+
+class RaggedQwen2Decoder(q2.Qwen2MoeDecoderLayer):
+    def __init__(self, vllm_config, prefix=""):
+        nn.Module.__init__(self)
+        config = vllm_config.model_config.hf_text_config
+        self.hidden_size = config.hidden_size
+        self.self_attn = q2.Qwen2MoeAttention(
+            hidden_size=config.hidden_size, num_heads=config.num_attention_heads,
+            num_kv_heads=config.num_key_value_heads, rope_parameters=config.rope_parameters,
+            max_position_embeddings=config.max_position_embeddings,
+            cache_config=vllm_config.cache_config, quant_config=None, prefix=f"{prefix}.self_attn")
+        self.mlp = _mlp(config, prefix)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+
+class RaggedOlmoeDecoder(ol.OlmoeDecoderLayer):
+    def __init__(self, vllm_config, prefix=""):
+        nn.Module.__init__(self)
+        config = vllm_config.model_config.hf_text_config
+        self.hidden_size = config.hidden_size
+        self.self_attn = ol.OlmoeAttention(vllm_config=vllm_config, prefix=f"{prefix}.self_attn")
+        self.mlp = _mlp(config, prefix)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
+
+
+class RaggedQwen35Decoder(q35.Qwen3_5DecoderLayer):
+    def __init__(self, vllm_config, prefix=""):
+        nn.Module.__init__(self)
+        config = vllm_config.model_config.hf_text_config
+        self.layer_idx = extract_layer_index(prefix)
+        self.layer_type = config.layer_types[self.layer_idx]
+        self.use_attn_reduce_scatter_for_moe = False
+        if self.layer_type == "linear_attention":
+            self.linear_attn = q35.QwenGatedDeltaNetAttention(
+                config=config, vllm_config=vllm_config, prefix=f"{prefix}.linear_attn",
+                gqa_interleaved_layout=False, reduce_results=True)
+        elif self.layer_type == "full_attention":
+            self.self_attn = q35.Qwen3NextAttention(
+                config, model_config=vllm_config.model_config,
+                cache_config=vllm_config.cache_config, quant_config=None,
+                prefix=f"{prefix}.self_attn", reduce_results=True)
+        else:
+            raise ValueError(f"Unknown Qwen3.5 layer type: {self.layer_type}")
+        self.mlp = _mlp(config, prefix)
+        self.input_layernorm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.layer_scale = getattr(config, "layer_scale", False)
+        if self.layer_scale:
+            self.attn_layer_scale = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
+            self.ffn_layer_scale = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
+
+
+def _init_model(module, vllm_config, prefix, decoder, *, hybrid=False):
+    nn.Module.__init__(module)
+    # These upstream classes wrap __call__ with support_torch_compile. Their
+    # stock initializer normally sets this flag; our backend requires eager.
+    module.do_not_compile = True
+    config = vllm_config.model_config.hf_text_config
+    module.config = config
+    module.quant_config = None
+    module.vocab_size = config.vocab_size
+    module.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size,
+                                                 quant_config=None, prefix=f"{prefix}.embed_tokens")
+    module.start_layer, module.end_layer, module.layers = make_layers(
+        config.num_hidden_layers, lambda prefix: decoder(vllm_config, prefix), prefix=f"{prefix}.layers")
+    norm = GemmaRMSNorm if hybrid else RMSNorm
+    module.norm = (norm(config.hidden_size, eps=config.rms_norm_eps)
+                   if get_pp_group().is_last_rank else PPMissingLayer())
+    module.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+        ["hidden_states", "residual"], config.hidden_size)
+    if hybrid:
+        module.is_fused_shared_expert_enabled = False
+        module.num_redundant_experts = 0
+        module.aux_hidden_state_layers = ()
+
+
+class RaggedQwen2Model(q2.Qwen2MoeModel):
+    def __init__(self, *, vllm_config, prefix=""):
+        _init_model(self, vllm_config, prefix, RaggedQwen2Decoder)
+
+
+class RaggedQwen35Model(q35.Qwen3_5Model):
+    def __init__(self, *, vllm_config, prefix=""):
+        _init_model(self, vllm_config, prefix, RaggedQwen35Decoder, hybrid=True)
+
+
+class _RaggedCausalLM(nn.Module, SupportsPP):
+    # Expert columns use TP; whole decoder layers can additionally use PP.
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+    embedding_modules = {"embed_tokens": "input_embeddings", "lm_head": "output_embeddings"}
+
+    def _init(self, vllm_config, prefix, model_type, **model_kwargs):
+        nn.Module.__init__(self)
+        config = _validate(vllm_config)
+        self.config = config
+        self.quant_config = None
+        self.model = model_type(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"), **model_kwargs)
+        # Some reused upstream models (including GPT-OSS) still construct a
+        # trailing norm on every stage. Their forwards use it only on the last.
+        if not get_pp_group().is_last_rank:
+            self.model.norm = PPMissingLayer()
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size, quant_config=None,
+                                          prefix=maybe_prefix(prefix, "lm_head"))
+            if config.tie_word_embeddings:
+                embedding = getattr(self.model, "embed_tokens", None)
+                if embedding is None:
+                    embedding = self.model.embedding  # GPT-OSS's native name.
+                self.lm_head = self.lm_head.tie_weights(embedding)
+        else:
+            self.lm_head = PPMissingLayer()
+        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
+
+    embed_input_ids = q3.Qwen3MoeForCausalLM.embed_input_ids
+    forward = q3.Qwen3MoeForCausalLM.forward
+    compute_logits = q3.Qwen3MoeForCausalLM.compute_logits
+
+
+class RaggedQwen3MoeForCausalLM(_RaggedCausalLM):
+    hf_to_vllm_mapper = q3.Qwen3MoeForCausalLM.hf_to_vllm_mapper
+    load_weights = q3.Qwen3MoeForCausalLM.load_weights
+
+    def __init__(self, *, vllm_config, prefix=""):
+        self._init(vllm_config, prefix, q3.Qwen3MoeModel, decoder_layer_type=RaggedDecoderLayer)
+
+
+class RaggedQwen2MoeForCausalLM(_RaggedCausalLM):
+    hf_to_vllm_mapper = q2.Qwen2MoeForCausalLM.hf_to_vllm_mapper
+    load_weights = q2.Qwen2MoeForCausalLM.load_weights
+
+    def __init__(self, *, vllm_config, prefix=""):
+        self._init(vllm_config, prefix, RaggedQwen2Model)
+
+
+class RaggedOlmoeForCausalLM(_RaggedCausalLM):
+    hf_to_vllm_mapper = ol.OlmoeForCausalLM.hf_to_vllm_mapper
+    load_weights = ol.OlmoeForCausalLM.load_weights
+
+    def __init__(self, *, vllm_config, prefix=""):
+        self._init(vllm_config, prefix, ol.OlmoeModel, layer_type=RaggedOlmoeDecoder)
+
+
+class RaggedQwen3_5MoeForCausalLM(_RaggedCausalLM, HasInnerState, IsHybrid, SupportsMRoPE):
+    hf_to_vllm_mapper = q35.Qwen3_5ForCausalLMBase.hf_to_vllm_mapper
+    load_weights = q35.Qwen3_5ForCausalLMBase.load_weights
+    forward = q35.Qwen3_5ForCausalLMBase.forward
+    get_mrope_input_positions = q35.Qwen3_5ForCausalLMBase.get_mrope_input_positions
+    get_mamba_state_dtype_from_config = q35.Qwen3_5ForCausalLMBase.__dict__["get_mamba_state_dtype_from_config"]
+    get_mamba_state_shape_from_config = q35.Qwen3_5ForCausalLMBase.__dict__["get_mamba_state_shape_from_config"]
+    get_mamba_state_copy_func = q35.Qwen3_5ForCausalLMBase.__dict__["get_mamba_state_copy_func"]
+
+    def __init__(self, *, vllm_config, prefix=""):
+        if vllm_config.cache_config.mamba_cache_mode == "all":
+            raise ValueError("Qwen3.5 ragged requires mamba_cache_mode=align or none")
+        self._init(vllm_config, prefix, RaggedQwen35Model)
+        if not any(self.config.layer_types[i] == "linear_attention"
+                   for i in range(self.model.start_layer, self.model.end_layer)):
+            raise ValueError("vLLM 0.29.0 requires a linear-attention layer in each Qwen3.5 pipeline stage")
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        self.scheduler_config = vllm_config.scheduler_config
+
+
+# Bias/activation variants reuse the same packed storage and Triton GEMMs.
+def _run_packed(module, hidden, ids, weights):
+    experts = module.experts
+    result = ragged_experts(hidden, experts.gate_up_proj, experts.down_proj,
+                            module.widths, module.offsets, module.max_width, ids, weights,
+                            activation=experts.activation,
+                            gate_up_bias=getattr(experts, "gate_up_proj_bias", None),
+                            down_bias=getattr(experts, "down_proj_bias", None))
+    # Every rank has the same token routes and a disjoint neuron interval.
+    # Reduce before adding shared experts or applying downstream norms.
+    if experts.tp_size > 1:
+        result = tensor_model_parallel_all_reduce(result)
+    return result
+
+
+def _init_packed(module, config, layer):
+    widths = config.less_is_moe["expert_intermediate_sizes"][str(layer)]
+    module.experts = TensorParallelPackedExperts(widths, config.hidden_size, **expert_options(config))
+    module.register_buffer("widths", torch.tensor(module.experts.widths, dtype=torch.int32), persistent=False)
+    module.register_buffer("offsets", torch.tensor(module.experts.offsets, dtype=torch.int64), persistent=False)
+    module.max_width = max(module.experts.widths)
+
+
+class RaggedGptMLP(nn.Module):
+    def __init__(self, vllm_config, layer_idx, prefix=""):
+        super().__init__()
+        config = vllm_config.model_config.hf_text_config
+        self.top_k = config.num_experts_per_tok
+        self.router = ReplicatedLinear(config.hidden_size, config.num_local_experts,
+                                       bias=True, quant_config=None, return_bias=False, prefix=f"{prefix}.router")
+        _init_packed(self, config, layer_idx)
+
+    def forward(self, hidden):
+        logits = self.router(hidden)
+        values, ids = logits.topk(self.top_k, dim=-1)
+        weights = values.softmax(-1)
+        return _run_packed(self, hidden, ids, weights)
+
+
+class RaggedGptBlock(gpt.TransformerBlock):
+    mlp_cls = RaggedGptMLP
+
+
+def _load_plain_weights(module, weights, *, gemma=False):
+    """Load compact tensors directly, while retaining upstream linear loaders."""
+    params = dict(module.named_parameters())
+    params.update(dict(module.named_buffers()))
+    loaded = set()
+    stacks = [("q_proj", "qkv_proj", "q"), ("k_proj", "qkv_proj", "k"), ("v_proj", "qkv_proj", "v")]
+    if gemma:
+        stacks += [("gate_proj", "gate_up_proj", 0), ("up_proj", "gate_up_proj", 1)]
+    for name, tensor in weights:
+        if is_pp_missing_parameter(name, module):
+            continue
+        for old, new, shard in stacks:
+            if f".{old}." not in name:
+                continue
+            target = name.replace(f".{old}.", f".{new}.")
+            if target not in params:
+                continue
+            param = params[target]
+            param.weight_loader(param, tensor, shard)
+            loaded.add(target)
+            break
+        else:
+            if name not in params:
+                raise ValueError(f"Unrecognized compact checkpoint tensor: {name}")
+            param = params[name]
+            getattr(param, "weight_loader", default_weight_loader)(param, tensor)
+            loaded.add(name)
+    return loaded
+
+
+class RaggedGptModel(gpt.GptOssModel):
+    block_cls = RaggedGptBlock
+
+    def load_weights(self, weights):
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+        heads = self.config.num_attention_heads
+
+        def sharded():
+            for name, weight in weights:
+                # Upstream GPT-OSS slices sinks in its model weight loader,
+                # rather than attaching a loader to the attention parameter.
+                if name.endswith(".attn.sinks"):
+                    if tuple(weight.shape) != (heads,):
+                        raise ValueError("Invalid GPT-OSS attention sink shape")
+                    local_heads = heads // tp_size
+                    weight = weight.narrow(0, tp_rank * local_heads, local_heads)
+                yield name, weight
+
+        return _load_plain_weights(self, sharded())
+
+
+class RaggedGptOssForCausalLM(_RaggedCausalLM):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={".self_attn.": ".attn."},
+        orig_to_new_suffix={".embed_tokens.weight": ".embedding.weight"})
+
+    def __init__(self, *, vllm_config, prefix=""):
+        self._init(vllm_config, prefix, RaggedGptModel)
+
+    def load_weights(self, weights):
+        return AutoWeightsLoader(self).load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+
+class RaggedGemmaMoE(nn.Module):
+    def __init__(self, config, layer):
+        super().__init__()
+        self.top_k = config.top_k_experts
+        self.per_expert_scale = nn.Parameter(torch.ones(config.num_experts))
+        _init_packed(self, config, layer)
+
+    def forward(self, hidden, logits):
+        weights, ids = g4.gemma4_fused_routing_kernel_triton(logits, self.top_k, self.per_expert_scale)
+        return _run_packed(self, hidden, ids, weights)
+
+
+class RaggedGemmaModel(g4.Gemma4Model):
+    def __init__(self, *, vllm_config, prefix=""):
+        import copy
+        config = vllm_config.model_config.hf_text_config
+        # Construct upstream attention/dense/PLE/YOCO modules with routed MoE
+        # disabled, then add only compact experts. No rectangular MoE allocation
+        # and no monkeypatch of upstream classes or functions is necessary.
+        base_config = copy.deepcopy(config)
+        base_config.enable_moe_block = False
+        base_config.use_second_mlp_block = False
+        construction = copy.copy(vllm_config)
+        construction.model_config = copy.copy(vllm_config.model_config)
+        construction.model_config.hf_config = base_config
+        construction.model_config.hf_text_config = base_config
+        super().__init__(vllm_config=construction, prefix=prefix)
+        self.config = config
+        for i in range(self.start_layer, self.end_layer):
+            layer = self.layers[i]
+            layer.enable_moe_block = True
+            layer.router = g4.Gemma4Router(config, quant_config=None, prefix=f"{prefix}.layers.{i}.router")
+            layer.moe = RaggedGemmaMoE(config, i)
+            for name in ("post_feedforward_layernorm_1", "post_feedforward_layernorm_2", "pre_feedforward_layernorm_2"):
+                setattr(layer, name, RMSNorm(config.hidden_size, eps=config.rms_norm_eps))
+
+    def load_weights(self, weights):
+        def mapped():
+            for name, weight in weights:
+                name = name.replace(".router.per_expert_scale", ".moe.per_expert_scale")
+                if ".experts." in name and ".moe.experts." not in name:
+                    name = name.replace(".experts.", ".moe.experts.")
+                yield name, weight
+                if ".self_attn.k_proj." in name and getattr(self.config, "attention_k_eq_v", False):
+                    layer = extract_layer_index(name)
+                    if self.config.layer_types[layer] == "full_attention":
+                        yield name.replace(".k_proj.", ".v_proj."), weight
+        return _load_plain_weights(self, mapped(), gemma=True)
+
+
+class RaggedGemma4ForCausalLM(_RaggedCausalLM):
+    packed_modules_mapping = g4.Gemma4ForCausalLM.packed_modules_mapping
+
+    def __init__(self, *, vllm_config, prefix=""):
+        self._init(vllm_config, prefix, RaggedGemmaModel)
+        self.logits_processor = LogitsProcessor(self.config.vocab_size,
+                                                soft_cap=getattr(self.config, "final_logit_softcapping", None))
+
+    def load_weights(self, weights):
+        return AutoWeightsLoader(self).load_weights(weights)

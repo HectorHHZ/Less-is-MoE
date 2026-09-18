@@ -65,6 +65,7 @@ judge = ["openai>=1.0,<3"]
 
 [project.entry-points."vllm.general_plugins"]
 less_is_moe = "less_is_moe.model_patches.vllm_plugin:register"
+less_is_moe_ragged = "less_is_moe.intdim.ragged_plugin:register"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

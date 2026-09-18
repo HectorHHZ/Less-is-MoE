@@ -16,6 +16,7 @@
 !docs/
 !docs/ENVIRONMENTS.md
 !docs/DOCKER.md
+!docs/RAGGED_EXPERTS.md
 !docker/
 !docker/smoke_test.py
 !docker/intdim_vllm_smoke.py
