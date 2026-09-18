@@ -1,8 +1,8 @@
-# SuperGPQA evaluation
+# SuperGPQA and GPQA-Diamond evaluation
 
 The existing `scripts/evaluate/zero_shot.sh` entry point accepts
-`--dataset supergpqa`. It supports GPT-OSS and the stock/ragged model loaders
-in the unified GPU environment.
+`--dataset supergpqa` and `--dataset gpqa_diamond`. It supports GPT-OSS and
+Qwen3.5 with both the stock and ragged model loaders in the unified GPU image.
 
 ## Protocol
 
@@ -93,3 +93,48 @@ GPT-OSS's released expert weights are MXFP4. The structural-pruning workflow
 uses BF16 weights dequantized from that checkpoint. Use the same unpruned BF16
 export for the primary pruning baseline, and label it explicitly as dequantized
 BF16. Native MXFP4 inference is a separate precision setting.
+
+## Qwen3.5-aligned multiple-choice profile
+
+Prepare the licensed GPQA-Diamond source after downloading its `train` split:
+
+```bash
+python -m less_is_moe.evaluation.supergpqa \
+  --dataset gpqa_diamond --input /data/gpqa_diamond.jsonl \
+  --output_dir /data/gpqa-diamond-full --calibration_size 0 --seed 42 \
+  --tokenizer_path /models/Qwen3.5-122B-A10B
+```
+
+The normalizer deterministically shuffles the correct answer and three
+distractors for each question, saves the resulting answer letter, and pins the
+dataset revision and hashes in `split-manifest.json`.
+
+Use `--mcq_profile qwen35-mcq` for Qwen3.5's published multiple-choice answer
+format. The following settings match the model card's published generation
+recommendations: temperature 1, top-p 0.95, top-k 20, min-p 0, presence
+penalty 1.5, and eight independent GPQA samples. Every repeat keeps the same
+frozen option order and receives its own deterministic seed. Accuracy is the
+mean pass@1 across all completions; there is no majority vote or best-of-N.
+
+```bash
+scripts/evaluate/zero_shot.sh \
+  --dataset gpqa_diamond --data_path /data/gpqa-diamond-full/evaluation.jsonl \
+  --output_dir /outputs/qwen35-gpqa --model_name_or_path /models/Qwen3.5-122B-A10B \
+  --base_model --runtime_patch stock --dtype bf16 --tensor_parallel_size 4 \
+  --use_chat_template --mcq_profile qwen35-mcq --n_samples_per_problem 8 \
+  --temperature 1 --top_p 0.95 --top_k 20 --min_p 0 \
+  --presence_penalty 1.5 --repetition_penalty 1 \
+  --max_tokens 32768 --max_model_len 131072 --seed 42
+```
+
+GPT-OSS uses the same profile with `--reasoning_effort high`, its Harmony chat
+template, top-p 1, top-k -1, and presence penalty 0. The scorer reads only the
+last Harmony `final` channel, including constrained JSON final channels. For
+Qwen, text before a closing `</think>` tag is never scored. Runs record prompt,
+data, source-code, model-config, and dependency hashes and can resume only when
+all frozen settings still match.
+
+The Qwen model card does not publish every detail of the benchmark harness.
+These settings align the disclosed prompt and sampling behavior and record the
+remaining protocol explicitly; they should not be described as an exact
+reproduction of undisclosed internal evaluation code.

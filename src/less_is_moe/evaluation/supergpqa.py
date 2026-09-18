@@ -1,6 +1,7 @@
-"""SuperGPQA preparation and resumable GPU evaluation.
+"""SuperGPQA / normalized GPQA-Diamond preparation and resumable GPU evaluation.
 
-The question template follows SuperGPQA/SuperGPQA's zero-shot protocol.
+The default question template follows SuperGPQA/SuperGPQA's zero-shot protocol.
+The qwen35-mcq profile follows Qwen3.5's published multiple-choice format.
 Keep the generated split manifest with every base/pruned comparison.
 """
 
@@ -14,22 +15,33 @@ import json
 import os
 from pathlib import Path
 import re
+import random
 import time
 import unicodedata
 
 DATASET_REVISION = "4430d4458112c7d4497fdcf94d7cc223313d6acf"
+GPQA_DATASET_REVISION = "633f5ee89ab8ad4522a9f850766b73f62147ffdd"
 PROMPT = (
     "Answer the following multiple choice question. There is only one correct answer. "
     "The last line of your response should be in the format 'Answer: $LETTER' "
     "(without quotes), where LETTER is one of A, B, C, D, E, F, G, H, I, or J.\n\n{}\n"
 )
 PROTOCOL_VERSION = 1
+GPQA_PROMPT = (
+    "Answer the following multiple choice question. There is only one correct answer. "
+    "The last line of your response should be in the format 'Answer: $LETTER' "
+    "(without quotes), where LETTER is one of A, B, C, or D.\n\n{}\n"
+)
+QWEN_MCQ_PROMPT = (
+    "Answer the following multiple choice question. There is only one correct answer.\n\n{}\n\n"
+    'Please show your choice in the `answer` field with only the choice letter, e.g., "answer": "C".'
+)
 
 
 def read_rows(path):
     text = Path(path).read_text(encoding="utf-8")
     return json.loads(text) if text.lstrip().startswith("[") else [
-        json.loads(line) for line in text.splitlines() if line.strip()]
+        json.loads(line) for line in text.split("\n") if line.strip()]
 
 
 def digest(value):
@@ -70,9 +82,37 @@ def validate_rows(rows):
             raise ValueError(f"Missing hierarchy: {row['uuid']}")
 
 
-def build_prompt(row):
+def build_prompt(row, *, profile="supergpqa"):
     choices = "\n".join(f"{chr(65 + i)}) {option}" for i, option in enumerate(row["options"]))
-    return PROMPT.format(row["question"] + "\n" + choices)
+    if profile == "qwen35-mcq":
+        template = QWEN_MCQ_PROMPT
+    elif profile == "supergpqa":
+        template = GPQA_PROMPT if row.get("benchmark") == "gpqa_diamond" else PROMPT
+    else:
+        raise ValueError(f"Unknown MCQ profile: {profile}")
+    return template.format(row["question"] + "\n" + choices)
+
+
+def normalize_gpqa(rows, *, seed=42):
+    """Freeze four-choice order without assuming the correct answer is always A."""
+    result = []
+    for row in rows:
+        question = row["Question"].strip()
+        choices = [row["Correct Answer"]] + [row[f"Incorrect Answer {i}"] for i in (1, 2, 3)]
+        if not all(isinstance(choice, str) and choice.strip() for choice in choices):
+            raise ValueError("GPQA choices must be nonempty strings")
+        uuid = "gpqa-" + digest([question, sorted(choices)])[:24]
+        order = list(range(4))
+        random.Random(int(digest([seed, uuid])[:16], 16)).shuffle(order)
+        result.append({
+            "uuid": uuid, "benchmark": "gpqa_diamond", "question": question,
+            "options": [choices[i] for i in order], "answer": choices[0],
+            "answer_letter": chr(65 + order.index(0)),
+            "discipline": "Science", "field": row.get("High-level domain") or "Science",
+            "subfield": row.get("Subdomain") or row.get("High-level domain") or "Science",
+        })
+    validate_rows(result)
+    return result
 
 
 def fixed_chat(tokenizer, messages, *, reasoning_effort, prompt_date, generation=True):
@@ -88,7 +128,8 @@ def fixed_chat(tokenizer, messages, *, reasoning_effort, prompt_date, generation
 
 def prepare_dataset(rows, output_dir, *, calibration_size=128, seed=42,
                     dataset_revision=DATASET_REVISION, tokenizer=None,
-                    reasoning_effort="high", prompt_date="2026-09-17"):
+                    reasoning_effort="high", prompt_date="2026-09-17",
+                    dataset_name="m-a-p/SuperGPQA"):
     validate_rows(rows)
     groups = defaultdict(list)
     for row in rows:
@@ -131,7 +172,7 @@ def prepare_dataset(rows, output_dir, *, calibration_size=128, seed=42,
     for filename, values in (("calibration.jsonl", calibration_output), ("evaluation.jsonl", evaluation)):
         (folder / filename).write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in values), encoding="utf-8")
     manifest = {
-        "protocol_version": PROTOCOL_VERSION, "dataset": "m-a-p/SuperGPQA",
+        "protocol_version": PROTOCOL_VERSION, "dataset": dataset_name,
         "dataset_revision": dataset_revision, "source_rows_sha256": digest(rows),
         "source_count": len(rows), "seed": seed, "calibration_count": len(calibration),
         "evaluation_count": len(evaluation), "calibration_uuids": [r["uuid"] for r in calibration],
@@ -147,24 +188,97 @@ def prepare_dataset(rows, output_dir, *, calibration_size=128, seed=42,
     return manifest
 
 
-def final_answer_text(raw, *, harmony=False):
+def final_answer_text(raw, *, harmony=False, thinking_prefix=False):
     if harmony:
-        marker = "<|channel|>final<|message|>"
-        if marker not in raw:
+        # Harmony headers can carry formatting metadata between the channel
+        # and message delimiter, e.g. final <|constrain|>json<|message|>.
+        markers = list(re.finditer(
+            r"<\|channel\|>final(?:\s*<\|constrain\|>[^\r\n<]*)?\s*<\|message\|>", raw))
+        if not markers:
             return ""  # Never score an answer mentioned only inside reasoning.
-        raw = raw.rsplit(marker, 1)[1]
+        raw = raw[markers[-1].end():]
     elif "</think>" in raw:
         raw = raw.rsplit("</think>", 1)[1]
-    elif "<think>" in raw:
+    elif "<think>" in raw or thinking_prefix:
         return ""
     return re.split(r"<\|(?:fim_suffix|im_end|end|start|return)\|>", raw, maxsplit=1)[0].strip()
 
 
-def extract_answer(text, options):
+def extract_answer(text, options, *, profile="supergpqa"):
     """Parse a final answer without searching arbitrary single letters in prose."""
     if not text:
         return None
     allowed = "ABCDEFGHIJ"[:len(options)]
+    if profile == "qwen35-mcq":
+        text = text.translate(str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'"}))
+        plain = text.replace("**", "").replace("`", "")
+        # Accept either a JSON object or the field fragment shown in Qwen's
+        # model card. Only read standalone fields / object lines, so quoting
+        # the prompt's example in explanatory prose is not an answer field.
+        # Missing key/value quotes and Markdown wrappers do not change a
+        # clearly selected single letter. Invalid or conflicting fields fail.
+        field_lines = []
+        for line in plain.split("\n"):
+            # A heading can introduce the field on the same line.
+            line = re.sub(
+                r"""^\s*(?:#{1,6}\s+)?(?:final\s+)?answer\s*:\s*(?=\{|["']?answer["']?\s*:)""",
+                "", line, flags=re.IGNORECASE)
+            if re.match(r"""\s*(?:\{|["']?answer["']?\s*:)""", line, re.IGNORECASE):
+                field_lines.append(line.strip())
+        matches = [value for line in field_lines for value in re.findall(
+            r"""(?:["']answer["']|(?<!\w)answer["']?)\s*:\s*["']([^"'\n]*)(?:["']|$)""",
+            line, re.IGNORECASE)]
+        answers = {match.strip().upper() for match in matches}
+        if matches and len(answers) != 1:
+            return None
+        if answers:
+            answer = answers.pop()
+            return answer if len(answer) == 1 and answer in allowed else None
+        # Accuracy measures the selected option, not JSON-format compliance.
+        # Permit an unambiguous standalone letter or explicit final answer
+        # line. Never search arbitrary letters or intermediate reasoning.
+        lines = [line.strip() for line in text.split("\n")
+                 if line.strip() and not line.strip().startswith("```")]
+        tail = lines[-1] if lines else ""
+        tail = tail.replace("**", "").replace("`", "").strip()
+        match = re.fullmatch(
+            rf"(?:(?:final\s+)?answer\s*:\s*)?[\"']?([{allowed}])[\"']?\.?",
+            tail, re.IGNORECASE)
+        standalone = match.group(1).upper() if match else None
+        # A labelled final choice can include the option text, e.g.
+        # "Answer: C (3)" or "The correct answer is A.". Require an
+        # explicit line-leading answer marker; never scan arbitrary letters.
+        named = re.findall(
+            r"(?mi)^[ \t]*(?:#{1,6}[ \t]+)?"
+            r"(?:(?:hence|thus|therefore)[,:]?[ \t]+)?"
+            r"(?:(?:the|my)[ \t]+)?"
+            r"(?:(?:correct|final|closest|best)[ \t]+)?"
+            r"(?:answer(?:[ \t]+choice)?|choice)"
+            r"(?:[ \t]+among[ \t]+(?:the[ \t]+)?(?:given[ \t]+)?(?:options|choices))?"
+            r"(?:[ \t]+is[ \t]*:?|[ \t]*[:\-–—])\s*"
+            r"[\"'(]?(?P<choice>(?-i:[A-J]))"
+            r"(?![ \t]*(?:\(?[ \t]*(?:or|and)\b|[/,])[ \t]*(?-i:[A-J])\b)"
+            r"(?=$|[\s).,:;\-–—\"'])",
+            plain)
+        labelled_boxes = re.findall(
+            r"\\boxed\s*\{\s*\\(?:text|mathrm|mathbf)\s*\{\s*([A-J])\s*[.)]\s*\}",
+            text)
+        boxed = re.findall(
+            r"\\boxed\s*\{\s*(?:\\(?:text|mathrm|mathbf)\s*\{\s*)?([A-J])\s*\}",
+            text, re.IGNORECASE)
+        named_boxes = re.findall(
+            r"\\boxed\s*\{\s*(?:\\(?:text|mathrm|mathbf)\s*\{\s*)?"
+            r"(?:answer|choice)\s*\}?\s*:\s*[\"']?([A-J])[\"']?\s*\}",
+            text, re.IGNORECASE)
+        choices = {choice.upper() for choice in (*named, *labelled_boxes, *boxed, *named_boxes)}
+        if standalone is not None:
+            choices.add(standalone)
+        if len(choices) == 1:
+            choice = choices.pop()
+            return choice if choice in allowed else None
+        return None
+    if profile != "supergpqa":
+        raise ValueError(f"Unknown MCQ profile: {profile}")
     # Match formatting wrappers without accepting a prefix of another word.
     wrapper = r"(?:[\s*$({\[]|\\(?:boxed|mathbf|mathrm|text)\s*\{)*"
     patterns = [
@@ -188,6 +302,15 @@ def metrics(records):
               "truncated": sum(r["finish_reason"] == "length" for r in records),
               "completion_tokens": sum(r["completion_tokens"] for r in records)}
     result["accuracy"] = result["correct"] / len(records) if records else 0.0
+    if records and "sample_id" in records[0]:
+        repeats = defaultdict(list)
+        for row in records:
+            repeats[row["repeat_index"]].append(row["correct"])
+        result["unique_questions_completed"] = len({r["uuid"] for r in records})
+        result["by_repeat"] = {
+            str(index): {"total": len(values), "correct": sum(values),
+                         "accuracy": sum(values) / len(values)}
+            for index, values in sorted(repeats.items())}
     for depth, name in enumerate(("discipline", "field", "subfield"), 1):
         groups = defaultdict(list)
         for row in records:
@@ -198,6 +321,20 @@ def metrics(records):
         result[f"{name}_macro_accuracy"] = sum(v["accuracy"] for v in scores.values()) / len(scores) if scores else 0.0
         result[f"by_{name}"] = scores
     return result
+
+
+def repeat_questions(rows, count):
+    if count < 1:
+        raise ValueError("Repeat count must be positive")
+    if count == 1:
+        return rows
+    return [{**row, "repeat_index": repeat,
+             "sample_id": f"{row['uuid']}/repeat-{repeat}"}
+            for repeat in range(count) for row in rows]
+
+
+def record_key(row):
+    return row.get("sample_id", row["uuid"])
 
 
 def completed_requests(llm, prompts, sampling_params):
@@ -227,8 +364,10 @@ def run_evaluation(args):
     from vllm import LLM, SamplingParams
     from vllm.sampling_params import RequestOutputKind
 
-    if args.n_samples_per_problem != 1 or args.stop_sequences:
-        raise ValueError("SuperGPQA currently requires one completion per question and native EOS stopping")
+    if args.n_samples_per_problem < 1 or args.stop_sequences:
+        raise ValueError("MCQ evaluation requires positive repeats and native EOS stopping")
+    if args.mcq_profile == "supergpqa" and args.n_samples_per_problem != 1:
+        raise ValueError("The legacy SuperGPQA profile requires one completion per question")
     if args.runtime_patch not in ("stock", "ragged"):
         raise ValueError("Use --runtime_patch stock (base/IntDim-E) or ragged (IntDim-L/G)")
     if not args.use_chat_template:
@@ -250,19 +389,25 @@ def run_evaluation(args):
         raise ValueError("Reasoning effort/date must match the frozen calibration protocol")
     if args.limit:
         rows = rows[:args.limit]
+    question_count = len(rows)
+    rows = repeat_questions(rows, args.n_samples_per_problem)
     config = AutoConfig.from_pretrained(args.model_name_or_path)
     family = config.get_text_config().model_type
     if args.runtime_patch == "ragged":
-        os.environ["VLLM_PLUGINS"] = "less_is_moe_ragged"
+        os.environ["VLLM_PLUGINS"] = "less_is_moe,less_is_moe_ragged"
     else:
         os.environ["VLLM_PLUGINS"] = ""
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
-    prompts = [fixed_chat(tokenizer, [{"role": "user", "content": build_prompt(r)}],
+    profile = args.mcq_profile
+    prompts = [fixed_chat(tokenizer, [{"role": "user", "content": build_prompt(r, profile=profile)}],
                           reasoning_effort=args.reasoning_effort, prompt_date=args.prompt_date) for r in rows]
     encoded = tokenizer(prompts, add_special_tokens=False)["input_ids"]
     too_long = [rows[i]["uuid"] for i, tokens in enumerate(encoded) if len(tokens) + args.max_tokens > args.max_model_len]
-    if too_long:
+    if too_long and profile == "supergpqa":
         raise ValueError(f"{len(too_long)} prompts exceed the context budget; increase --max_model_len. No rows were dropped.")
+    if any(len(tokens) >= args.max_model_len for tokens in encoded):
+        raise ValueError("A prompt exhausts the context window; no rows were dropped")
+    token_budgets = [min(args.max_tokens, args.max_model_len - len(tokens)) for tokens in encoded]
     folder = Path(args.output_dir)
     folder.mkdir(parents=True, exist_ok=True)
     settings = {key: getattr(args, key) for key in (
@@ -270,12 +415,27 @@ def run_evaluation(args):
         "seed", "temperature", "top_p", "top_k", "min_p", "presence_penalty", "repetition_penalty",
         "max_tokens", "max_model_len", "batch_size", "gpu_memory_utilization", "reasoning_effort",
         "prompt_date", "limit", "enforce_eager", "max_num_batched_tokens")}
-    settings.update(protocol_version=PROTOCOL_VERSION, dataset="supergpqa", tools=False,
+    benchmark = "gpqa_diamond" if split["dataset"] == "Idavidrein/gpqa" else "supergpqa"
+    if args.dataset.lower() != benchmark:
+        raise ValueError("--dataset does not match the frozen evaluation manifest")
+    settings.update(protocol_version=PROTOCOL_VERSION, dataset=benchmark, tools=False,
                     scheduling="continuous-final-only",
                     split_sha256=file_digest(split_path), data_sha256=file_digest(data_path),
-                    prompt_tokens_sha256=digest(encoded), question_count=len(rows),
+                    prompt_tokens_sha256=digest(encoded), question_count=question_count,
                     max_prompt_tokens=max(map(len, encoded)), model_config_sha256=digest(config.to_dict()),
                     versions={name: importlib.metadata.version(name) for name in ("torch", "transformers", "vllm", "tokenizers")})
+    if profile != "supergpqa":
+        settings.update(mcq_profile=profile, parser="final-only-mcq-answer-v4",
+                        evaluation_source_sha256=file_digest(__file__),
+                        sampling_repeats=args.n_samples_per_problem,
+                        expected_completions=len(rows),
+                        repeat_option_order="same frozen options in every repeat; independent per-question/repeat seed",
+                        generation_budget="min(max_tokens, max_model_len - prompt_tokens); no input truncation",
+                        minimum_effective_max_tokens=min(token_budgets),
+                        maximum_effective_max_tokens=max(token_budgets),
+                        aggregation="mean pass@1 over all completions; no majority vote or best-of-N; hierarchy macro scores also reported",
+                        protocol_source="https://huggingface.co/Qwen/Qwen3.5-122B-A10B#best-practices",
+                        protocol_scope="Published MCQ format; sampling parameters explicitly recorded. Exact reported benchmark protocol is not fully disclosed.")
     run_path, output_path = folder / "run.json", folder / "predictions.jsonl"
     if run_path.exists():
         if not args.resume or json.loads(run_path.read_text()) != settings:
@@ -285,9 +445,9 @@ def run_evaluation(args):
     else:
         write_json(run_path, settings)
     records = read_rows(output_path) if output_path.exists() else []
-    done = [r["uuid"] for r in records]
-    if len(done) != len(set(done)) or not set(done).issubset({r["uuid"] for r in rows}):
-        raise ValueError("Saved predictions contain duplicate or unexpected question UUIDs")
+    done = [record_key(r) for r in records]
+    if len(done) != len(set(done)) or not set(done).issubset({record_key(r) for r in rows}):
+        raise ValueError("Saved predictions contain duplicate or unexpected completion IDs")
     start_time = time.monotonic()
     initial_count = len(records)
     if len(records) < len(rows):
@@ -301,17 +461,22 @@ def run_evaluation(args):
                           kernel_config={"moe_backend": "triton"})
         if args.quantization:
             llm_kwargs["quantization"] = args.quantization
-        if family == "qwen3_5_moe_text":
+        if config.model_type == "qwen3_5_moe_text" and args.runtime_patch == "stock":
             llm_kwargs["hf_overrides"] = {"architectures": ["Qwen3_5MoeForCausalLM"]}
+        elif config.model_type == "qwen3_5_moe" and args.runtime_patch == "stock":
+            # The published checkpoint includes visual weights. Its native
+            # conditional-generation loader knows how to skip those weights
+            # when multimodal inputs are disabled; the text-only loader does not.
+            llm_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
         llm = LLM(**llm_kwargs)
         completed_ids = set(done)
-        pending_indices = [i for i, row in enumerate(rows) if row["uuid"] not in completed_ids]
+        pending_indices = [i for i, row in enumerate(rows) if record_key(row) not in completed_ids]
         params = [SamplingParams(
             n=1, temperature=args.temperature, top_p=args.top_p if args.temperature > 0 else 1.0,
             top_k=args.top_k if args.temperature > 0 else -1, min_p=args.min_p if args.temperature > 0 else 0.0,
             repetition_penalty=args.repetition_penalty, presence_penalty=args.presence_penalty,
-            max_tokens=args.max_tokens, skip_special_tokens=False, output_kind=RequestOutputKind.FINAL_ONLY,
-            seed=int(digest([args.seed, rows[i]["uuid"]])[:8], 16)) for i in pending_indices]
+            max_tokens=token_budgets[i], skip_special_tokens=False, output_kind=RequestOutputKind.FINAL_ONLY,
+            seed=int(digest([args.seed, record_key(rows[i])])[:8], 16)) for i in pending_indices]
         pending_prompts = [{"prompt_token_ids": encoded[i]} for i in pending_indices]
         last_report = time.monotonic()
         with output_path.open("a", encoding="utf-8") as output_file:
@@ -323,14 +488,22 @@ def run_evaluation(args):
                 if request_output.prompt_token_ids != encoded[data_index]:
                     raise RuntimeError("Completed request does not match the question's input tokens")
                 completion = request_output.outputs[0]
-                final = final_answer_text(completion.text, harmony=family == "gpt_oss")
-                prediction = extract_answer(final, row["options"])
+                # Qwen puts the opening <think> token in its generation prompt.
+                # A length-truncated continuation may therefore contain no tag
+                # at all; do not score an answer mentioned only in reasoning.
+                prompt = prompts[data_index]
+                thinking_prefix = prompt.rfind("<think>") > prompt.rfind("</think>")
+                final = final_answer_text(completion.text, harmony=family == "gpt_oss",
+                                          thinking_prefix=thinking_prefix)
+                prediction = extract_answer(final, row["options"], profile=profile)
                 record = {**row, "data_index": data_index, "raw_output": completion.text,
                           "final_answer": final, "prediction": prediction,
                           "correct": int(prediction == row["answer_letter"]),
                           "finish_reason": completion.finish_reason, "stop_reason": completion.stop_reason,
                           "completion_tokens": len(completion.token_ids),
                           "prompt_tokens": len(request_output.prompt_token_ids)}
+                if profile != "supergpqa":
+                    record["effective_max_tokens"] = token_budgets[data_index]
                 records.append(record)
                 output_file.write(json.dumps(record, ensure_ascii=False) + "\n")
                 output_file.flush()
@@ -352,10 +525,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True)
     parser.add_argument("--output_dir", required=True)
+    parser.add_argument("--dataset", choices=("supergpqa", "gpqa_diamond"), default="supergpqa")
     parser.add_argument("--calibration_size", type=int, default=128,
                         help="Use 0 for a complete-dataset base benchmark; use 64/128 for later pruning comparisons")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--dataset_revision", default=DATASET_REVISION)
+    parser.add_argument("--dataset_revision")
     parser.add_argument("--tokenizer_path")
     parser.add_argument("--reasoning_effort", choices=("low", "medium", "high"), default="high")
     parser.add_argument("--prompt_date", default="2026-09-17")
@@ -364,9 +538,20 @@ def main():
     if args.tokenizer_path:
         from transformers import AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
-    result = prepare_dataset(read_rows(args.input), args.output_dir, calibration_size=args.calibration_size,
-                             seed=args.seed, dataset_revision=args.dataset_revision, tokenizer=tokenizer,
-                             reasoning_effort=args.reasoning_effort, prompt_date=args.prompt_date)
+    rows = read_rows(args.input)
+    if args.dataset == "gpqa_diamond":
+        rows = normalize_gpqa(rows, seed=args.seed)
+        dataset_name = "Idavidrein/gpqa"
+        dataset_revision = args.dataset_revision or GPQA_DATASET_REVISION
+    else:
+        dataset_name = "m-a-p/SuperGPQA"
+        dataset_revision = args.dataset_revision or DATASET_REVISION
+    result = prepare_dataset(
+        rows, args.output_dir, calibration_size=args.calibration_size,
+        seed=args.seed, dataset_revision=dataset_revision, tokenizer=tokenizer,
+        reasoning_effort=args.reasoning_effort, prompt_date=args.prompt_date,
+        dataset_name=dataset_name,
+    )
     print(json.dumps({key: value for key, value in result.items() if not key.endswith("uuids")}, indent=2))
 
 

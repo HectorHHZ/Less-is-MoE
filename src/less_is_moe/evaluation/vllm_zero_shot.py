@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import time
+from pathlib import Path
 from typing import List, Dict, Any
 
 import numpy as np
@@ -541,7 +542,10 @@ def is_esft_dataset(name: str) -> bool:
 
 
 def main(args):
-    if args.dataset.lower() == "supergpqa":
+    if args.dataset.lower() == "supergpqa" or (
+        args.dataset.lower() == "gpqa_diamond"
+        and (Path(args.data_path).parent / "split-manifest.json").exists()
+    ):
         from .supergpqa import run_evaluation
         return run_evaluation(args)
     if args.runtime_patch == "ragged":
@@ -1141,6 +1145,8 @@ if __name__ == "__main__":
     parser.add_argument("--max_tokens", type=int, default=512)
     parser.add_argument("--reasoning_effort", choices=("low", "medium", "high"), default="high")
     parser.add_argument("--prompt_date", default="2026-09-17", help="Fixed date for reproducible GPT-OSS chat prompts")
+    parser.add_argument("--mcq_profile", choices=("supergpqa", "qwen35-mcq"), default="supergpqa",
+                        help="Frozen GPQA/SuperGPQA prompt and answer parser; qwen35-mcq uses the published JSON answer format")
     parser.add_argument("--limit", type=int, default=None, help="SuperGPQA smoke-test subset size")
     parser.add_argument("--resume", action="store_true", help="Resume a matching SuperGPQA run")
     parser.add_argument("--enforce_eager", action="store_true")
