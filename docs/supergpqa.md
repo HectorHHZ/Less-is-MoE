@@ -138,3 +138,9 @@ The Qwen model card does not publish every detail of the benchmark harness.
 These settings align the disclosed prompt and sampling behavior and record the
 remaining protocol explicitly; they should not be described as an exact
 reproduction of undisclosed internal evaluation code.
+
+## Experiment records
+
+- [GPT-OSS-120B IntDim 50% on GPQA-Diamond](experiments/gpt-oss-120b-gpqa-diamond-s1-seq8192.md)
+  records the complete BF16 baseline and IntDim-E/L/G comparison using the
+  128-sample, 8,192-token S1K calibration set.
