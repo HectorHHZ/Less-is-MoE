@@ -77,6 +77,14 @@ the split-manifest SHA-256 is
 The machine-readable record includes hashes for every raw prediction file and
 the frozen grading source.
 
+The public, question-safe per-sample predictions, complete metrics, run
+settings, grading audits, and frozen split manifest are available in the
+[`gpt-oss-120b-gpqa-diamond-s1-seq8192` artifact directory](artifacts/gpt-oss-120b-gpqa-diamond-s1-seq8192/README.md).
+The GPQA access terms prohibit publishing question examples online, so the
+public prediction files omit question text, options, answer text, raw model
+generations, and final-answer prose while retaining every field needed to
+recompute the reported scores.
+
 The protocol follows the public GPT-OSS settings used with Qwen3.5's published
 multiple-choice format. The complete internal benchmark harness behind the
 Qwen3.5 report is not public, so these results should not be described as an

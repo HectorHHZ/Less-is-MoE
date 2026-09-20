@@ -1,0 +1,16 @@
+{
+  "raw_predictions_sha256": "f0b5d126c8822321aef72beff0de4df7a2e4f2e88ad2eacff13dc48f34075184",
+  "grading_source_sha256": "afb168eebfbfedc5717a3df80f817906c212f8ae2ddf61c8f05e1a0537f0bc18",
+  "frozen_data_sha256": "9312a13f2c88c80082892fa4c60d761b5e6a04b943d36976f8904ac72e93f542",
+  "exact_question_sample_set_verified": true,
+  "source_folder": "/home/x9zou/reasoning-matrix-20260918-results/gptoss-s1-seq8192-128-global-gpqa_diamond",
+  "source_generation_parser": "final-only-json-answer-field-v1",
+  "family": "gptoss",
+  "changed_final_extractions": 0,
+  "changed_predictions": 1567,
+  "parsed_json_fields": 13,
+  "parsed_unambiguous_plain_choices": 1567,
+  "complete": true,
+  "reason": "Recognize standalone answer fields despite quote/Markdown formatting and ignore quoted format examples in explanatory prose; normalize typographic quotes and explicitly labelled choice boxes. Apply uniformly to all immutable completions.",
+  "selection_policy": "Uniform parser applied to every completion; no use of ground truth for extraction; no regeneration."
+}
