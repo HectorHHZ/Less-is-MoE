@@ -543,7 +543,7 @@ def is_esft_dataset(name: str) -> bool:
 
 def main(args):
     if args.dataset.lower() == "supergpqa" or (
-        args.dataset.lower() == "gpqa_diamond"
+        args.dataset.lower() in {"gpqa_diamond", "gpqa_main"}
         and (Path(args.data_path).parent / "split-manifest.json").exists()
     ):
         from .supergpqa import run_evaluation

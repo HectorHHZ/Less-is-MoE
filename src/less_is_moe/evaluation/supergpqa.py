@@ -87,14 +87,16 @@ def build_prompt(row, *, profile="supergpqa"):
     if profile == "qwen35-mcq":
         template = QWEN_MCQ_PROMPT
     elif profile == "supergpqa":
-        template = GPQA_PROMPT if row.get("benchmark") == "gpqa_diamond" else PROMPT
+        template = GPQA_PROMPT if row.get("benchmark") in {"gpqa_diamond", "gpqa_main"} else PROMPT
     else:
         raise ValueError(f"Unknown MCQ profile: {profile}")
     return template.format(row["question"] + "\n" + choices)
 
 
-def normalize_gpqa(rows, *, seed=42):
+def normalize_gpqa(rows, *, seed=42, benchmark="gpqa_diamond"):
     """Freeze four-choice order without assuming the correct answer is always A."""
+    if benchmark not in {"gpqa_diamond", "gpqa_main"}:
+        raise ValueError(f"Unsupported GPQA configuration: {benchmark}")
     result = []
     for row in rows:
         question = row["Question"].strip()
@@ -105,7 +107,7 @@ def normalize_gpqa(rows, *, seed=42):
         order = list(range(4))
         random.Random(int(digest([seed, uuid])[:16], 16)).shuffle(order)
         result.append({
-            "uuid": uuid, "benchmark": "gpqa_diamond", "question": question,
+            "uuid": uuid, "benchmark": benchmark, "question": question,
             "options": [choices[i] for i in order], "answer": choices[0],
             "answer_letter": chr(65 + order.index(0)),
             "discipline": "Science", "field": row.get("High-level domain") or "Science",
@@ -129,7 +131,7 @@ def fixed_chat(tokenizer, messages, *, reasoning_effort, prompt_date, generation
 def prepare_dataset(rows, output_dir, *, calibration_size=128, seed=42,
                     dataset_revision=DATASET_REVISION, tokenizer=None,
                     reasoning_effort="high", prompt_date="2026-09-17",
-                    dataset_name="m-a-p/SuperGPQA"):
+                    dataset_name="m-a-p/SuperGPQA", dataset_config=None):
     validate_rows(rows)
     groups = defaultdict(list)
     for row in rows:
@@ -173,6 +175,7 @@ def prepare_dataset(rows, output_dir, *, calibration_size=128, seed=42,
         (folder / filename).write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in values), encoding="utf-8")
     manifest = {
         "protocol_version": PROTOCOL_VERSION, "dataset": dataset_name,
+        "dataset_config": dataset_config,
         "dataset_revision": dataset_revision, "source_rows_sha256": digest(rows),
         "source_count": len(rows), "seed": seed, "calibration_count": len(calibration),
         "evaluation_count": len(evaluation), "calibration_uuids": [r["uuid"] for r in calibration],
@@ -415,7 +418,12 @@ def run_evaluation(args):
         "seed", "temperature", "top_p", "top_k", "min_p", "presence_penalty", "repetition_penalty",
         "max_tokens", "max_model_len", "batch_size", "gpu_memory_utilization", "reasoning_effort",
         "prompt_date", "limit", "enforce_eager", "max_num_batched_tokens")}
-    benchmark = "gpqa_diamond" if split["dataset"] == "Idavidrein/gpqa" else "supergpqa"
+    if split["dataset"] == "Idavidrein/gpqa":
+        benchmark = split.get("dataset_config") or "gpqa_diamond"
+        if benchmark not in {"gpqa_diamond", "gpqa_main"}:
+            raise ValueError(f"Unsupported GPQA configuration in split manifest: {benchmark}")
+    else:
+        benchmark = "supergpqa"
     if args.dataset.lower() != benchmark:
         raise ValueError("--dataset does not match the frozen evaluation manifest")
     settings.update(protocol_version=PROTOCOL_VERSION, dataset=benchmark, tools=False,
@@ -525,7 +533,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True)
     parser.add_argument("--output_dir", required=True)
-    parser.add_argument("--dataset", choices=("supergpqa", "gpqa_diamond"), default="supergpqa")
+    parser.add_argument("--dataset", choices=("supergpqa", "gpqa_diamond", "gpqa_main"), default="supergpqa")
     parser.add_argument("--calibration_size", type=int, default=128,
                         help="Use 0 for a complete-dataset base benchmark; use 64/128 for later pruning comparisons")
     parser.add_argument("--seed", type=int, default=42)
@@ -539,18 +547,20 @@ def main():
         from transformers import AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
     rows = read_rows(args.input)
-    if args.dataset == "gpqa_diamond":
-        rows = normalize_gpqa(rows, seed=args.seed)
+    if args.dataset in {"gpqa_diamond", "gpqa_main"}:
+        rows = normalize_gpqa(rows, seed=args.seed, benchmark=args.dataset)
         dataset_name = "Idavidrein/gpqa"
         dataset_revision = args.dataset_revision or GPQA_DATASET_REVISION
+        dataset_config = args.dataset
     else:
         dataset_name = "m-a-p/SuperGPQA"
         dataset_revision = args.dataset_revision or DATASET_REVISION
+        dataset_config = None
     result = prepare_dataset(
         rows, args.output_dir, calibration_size=args.calibration_size,
         seed=args.seed, dataset_revision=dataset_revision, tokenizer=tokenizer,
         reasoning_effort=args.reasoning_effort, prompt_date=args.prompt_date,
-        dataset_name=dataset_name,
+        dataset_name=dataset_name, dataset_config=dataset_config,
     )
     print(json.dumps({key: value for key, value in result.items() if not key.endswith("uuids")}, indent=2))
 
