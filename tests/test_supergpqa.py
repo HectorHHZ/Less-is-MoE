@@ -35,13 +35,20 @@ def test_gpqa_normalization_is_deterministic_and_preserves_answer():
     assert "A)" in build_prompt(row, profile="qwen35-mcq")
 
 
+def test_gpqa_main_normalization_preserves_split_identity():
+    row = normalize_gpqa(gpqa_source(), seed=42, benchmark="gpqa_main")[0]
+    assert row["benchmark"] == "gpqa_main"
+    assert "A)" in build_prompt(row, profile="supergpqa")
+
+
 def test_prepare_gpqa_manifest_is_frozen(tmp_path):
-    rows = normalize_gpqa(gpqa_source() * 1, seed=42)
+    rows = normalize_gpqa(gpqa_source() * 1, seed=42, benchmark="gpqa_main")
     manifest = prepare_dataset(
         rows, tmp_path, calibration_size=0, dataset_name="Idavidrein/gpqa",
-        dataset_revision="revision", seed=42,
+        dataset_revision="revision", dataset_config="gpqa_main", seed=42,
     )
     assert manifest["dataset"] == "Idavidrein/gpqa"
+    assert manifest["dataset_config"] == "gpqa_main"
     assert manifest["evaluation_count"] == 1
     saved = json.loads((tmp_path / "split-manifest.json").read_text())
     assert saved["evaluation_sha256"] == manifest["evaluation_sha256"]
