@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "dataset": {
+    "name": "Idavidrein/gpqa",
+    "config": "gpqa_diamond",
+    "revision": "633f5ee89ab8ad4522a9f850766b73f62147ffdd",
+    "question_count": 198,
+    "evaluation_jsonl_sha256": "9312a13f2c88c80082892fa4c60d761b5e6a04b943d36976f8904ac72e93f542",
+    "split_manifest_path": "dataset/split-manifest.json",
+    "split_manifest_sha256": "853ce946fbd9cd4309ce514ed69cbc571437df3d6bf30430f61d847a1350ff07",
+    "legacy_moe_honing_test_jsonl_sha256": "d5b0d6dad6c1993a8cb17fd7aa635fbc5e8b684ae42b5b6e80d15467b399eec3",
+    "question_text_committed": false,
+    "question_text_policy": "GPQA access terms request that examples not be revealed online."
+  },
+  "prediction_schema": {
+    "sanitized": true,
+    "omitted_fields": [
+      "question",
+      "options",
+      "answer",
+      "raw_output",
+      "final_answer"
+    ],
+    "question_identifier": "question_sha256",
+    "rows_per_run": 1584
+  },
+  "results": {
+    "base": {
+      "predictions_path": "results/base/predictions.sanitized.jsonl",
+      "predictions_sha256": "1cfd106a3975429b59befb8d5690bb61b630937efd80707c88bf655f12bdcbfe",
+      "metrics_path": "results/base/metrics.json",
+      "metrics_sha256": "cd6b18b69608b20950e2be506d180c85f6cbb42d27229223696463827f445c92",
+      "run_path": "results/base/run.json",
+      "run_sha256": "ac2c4c58add48e39e18dcd1d9d393947dab52a5f7a7f7644ad241ad7fd1ae3db",
+      "grading_audit_path": "results/base/grading-audit.json",
+      "grading_audit_sha256": "0d5e6a5f02499a81b90f6ced2c649c5717f96a40759675fb5567f344bd774b48",
+      "source_raw_predictions_sha256": "9f53ec4288e9d56b7e02bae549c97651d8790d6378112a0bb5ed51769c85faf8",
+      "rows": 1584,
+      "correct": 1255,
+      "total": 1584,
+      "accuracy": 0.7922979797979798,
+      "unparsed": 0,
+      "completion_tokens": 17951623
+    },
+    "intdim-e-50": {
+      "predictions_path": "results/intdim-e-50/predictions.sanitized.jsonl",
+      "predictions_sha256": "3123dac4413ec6ea9db76f09a124fd450ddb44d224c32db7a7a4ee3165202c46",
+      "metrics_path": "results/intdim-e-50/metrics.json",
+      "metrics_sha256": "920318949afc288cd7f36b26669855b1606f13bf1dfd002fccee7811e3fc3070",
+      "run_path": "results/intdim-e-50/run.json",
+      "run_sha256": "9a6c18ebb4bd8b19c83deafb49e32cc4b13cf7e9df9fc26d8e7d079d076cfa40",
+      "grading_audit_path": "results/intdim-e-50/grading-audit.json",
+      "grading_audit_sha256": "d31f8dd77ba05e855f5d8982e52c481deb2d879132d726d8cd8c99d5c431c699",
+      "source_raw_predictions_sha256": "335cf74cecc920bba398127a4d67e9390bb77882da63806988ca19b3a1fb75a1",
+      "rows": 1584,
+      "correct": 332,
+      "total": 1584,
+      "accuracy": 0.20959595959595959,
+      "unparsed": 85,
+      "completion_tokens": 997172
+    },
+    "intdim-l-50": {
+      "predictions_path": "results/intdim-l-50/predictions.sanitized.jsonl",
+      "predictions_sha256": "2c00b5090c5ea82d344c65d7cc64371b36f6cbb1f8a3f7d1e498c1cf787bd9c3",
+      "metrics_path": "results/intdim-l-50/metrics.json",
+      "metrics_sha256": "3fbca87fd943609d24c355a0501406541141e0436f13abe9582ee305a661a040",
+      "run_path": "results/intdim-l-50/run.json",
+      "run_sha256": "0bb5f36dc67983d4c1d10cdf857c3157dfad54371a3fd3ac16788f30e2ee06f6",
+      "grading_audit_path": "results/intdim-l-50/grading-audit.json",
+      "grading_audit_sha256": "467e0cdfe6adf6516b9f944c440a925c9a055e37597be997ef51ec1cf1df8721",
+      "source_raw_predictions_sha256": "b247c956c8bdffdde605fcec88f187365c0ac762e8ed5395cf71c9bab530224b",
+      "rows": 1584,
+      "correct": 866,
+      "total": 1584,
+      "accuracy": 0.5467171717171717,
+      "unparsed": 0,
+      "completion_tokens": 16065490
+    },
+    "intdim-g-50": {
+      "predictions_path": "results/intdim-g-50/predictions.sanitized.jsonl",
+      "predictions_sha256": "d5b0a103a80edd865d3997f458b69a228bc48b6294f5417f2b3f290a53db0cdb",
+      "metrics_path": "results/intdim-g-50/metrics.json",
+      "metrics_sha256": "992b61380a43a7b9e8909dba59b37bdae2122eee659370f2e799bd04f14ac018",
+      "run_path": "results/intdim-g-50/run.json",
+      "run_sha256": "c3ca7f1c0b652b0601773061ac106f264133e82d71bd2409ec3fbe1035d3d1c2",
+      "grading_audit_path": "results/intdim-g-50/grading-audit.json",
+      "grading_audit_sha256": "7da03cdf3afdd2656ebb9632e91e1597dce4c29e6b1f5ce7ca9380b01e8f2fea",
+      "source_raw_predictions_sha256": "f0b5d126c8822321aef72beff0de4df7a2e4f2e88ad2eacff13dc48f34075184",
+      "rows": 1584,
+      "correct": 1019,
+      "total": 1584,
+      "accuracy": 0.6433080808080808,
+      "unparsed": 4,
+      "completion_tokens": 17701545
+    }
+  }
+}

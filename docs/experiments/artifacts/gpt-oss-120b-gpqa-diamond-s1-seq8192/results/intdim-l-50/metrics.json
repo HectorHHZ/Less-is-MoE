@@ -1,0 +1,199 @@
+{
+  "total": 1584,
+  "correct": 866,
+  "unparsed": 0,
+  "truncated": 0,
+  "completion_tokens": 16065490,
+  "accuracy": 0.5467171717171717,
+  "unique_questions_completed": 198,
+  "by_repeat": {
+    "0": {
+      "total": 198,
+      "correct": 110,
+      "accuracy": 0.5555555555555556
+    },
+    "1": {
+      "total": 198,
+      "correct": 109,
+      "accuracy": 0.5505050505050505
+    },
+    "2": {
+      "total": 198,
+      "correct": 107,
+      "accuracy": 0.5404040404040404
+    },
+    "3": {
+      "total": 198,
+      "correct": 111,
+      "accuracy": 0.5606060606060606
+    },
+    "4": {
+      "total": 198,
+      "correct": 107,
+      "accuracy": 0.5404040404040404
+    },
+    "5": {
+      "total": 198,
+      "correct": 99,
+      "accuracy": 0.5
+    },
+    "6": {
+      "total": 198,
+      "correct": 101,
+      "accuracy": 0.51010101010101
+    },
+    "7": {
+      "total": 198,
+      "correct": 122,
+      "accuracy": 0.6161616161616161
+    }
+  },
+  "discipline_macro_accuracy": 0.5467171717171717,
+  "by_discipline": {
+    "Science": {
+      "total": 1584,
+      "correct": 866,
+      "accuracy": 0.5467171717171717
+    }
+  },
+  "field_macro_accuracy": 0.44254786284290365,
+  "by_field": {
+    "Science/Biology": {
+      "total": 152,
+      "correct": 20,
+      "accuracy": 0.13157894736842105
+    },
+    "Science/Chemistry": {
+      "total": 744,
+      "correct": 307,
+      "accuracy": 0.41263440860215056
+    },
+    "Science/Physics": {
+      "total": 688,
+      "correct": 539,
+      "accuracy": 0.7834302325581395
+    }
+  },
+  "subfield_macro_accuracy": 0.602141849940433,
+  "by_subfield": {
+    "Science/Biology/Genetics": {
+      "total": 32,
+      "correct": 2,
+      "accuracy": 0.0625
+    },
+    "Science/Biology/Molecular Biology": {
+      "total": 120,
+      "correct": 18,
+      "accuracy": 0.15
+    },
+    "Science/Chemistry/Chemistry (general)": {
+      "total": 160,
+      "correct": 121,
+      "accuracy": 0.75625
+    },
+    "Science/Chemistry/Inorganic Chemistry": {
+      "total": 8,
+      "correct": 2,
+      "accuracy": 0.25
+    },
+    "Science/Chemistry/Organic Chemistry": {
+      "total": 576,
+      "correct": 184,
+      "accuracy": 0.3194444444444444
+    },
+    "Science/Physics/Astrophysics": {
+      "total": 104,
+      "correct": 57,
+      "accuracy": 0.5480769230769231
+    },
+    "Science/Physics/Condensed Matter Physics": {
+      "total": 8,
+      "correct": 8,
+      "accuracy": 1.0
+    },
+    "Science/Physics/Electromagnetism and Photonics": {
+      "total": 48,
+      "correct": 32,
+      "accuracy": 0.6666666666666666
+    },
+    "Science/Physics/High-energy particle physics": {
+      "total": 112,
+      "correct": 81,
+      "accuracy": 0.7232142857142857
+    },
+    "Science/Physics/Optics and Acoustics": {
+      "total": 8,
+      "correct": 7,
+      "accuracy": 0.875
+    },
+    "Science/Physics/Physics (general)": {
+      "total": 152,
+      "correct": 130,
+      "accuracy": 0.8552631578947368
+    },
+    "Science/Physics/Quantum Mechanics": {
+      "total": 200,
+      "correct": 185,
+      "accuracy": 0.925
+    },
+    "Science/Physics/Relativistic Mechanics": {
+      "total": 56,
+      "correct": 39,
+      "accuracy": 0.6964285714285714
+    }
+  },
+  "complete": true,
+  "expected_total": 1584,
+  "run_settings": {
+    "model_name_or_path": "/models/pruned",
+    "dtype": "bfloat16",
+    "quantization": null,
+    "tensor_parallel_size": 4,
+    "runtime_patch": "ragged",
+    "seed": 42,
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "top_k": -1,
+    "min_p": 0.0,
+    "presence_penalty": 0.0,
+    "repetition_penalty": 1.0,
+    "max_tokens": 131072,
+    "max_model_len": 131072,
+    "batch_size": 128,
+    "gpu_memory_utilization": 0.9,
+    "reasoning_effort": "high",
+    "prompt_date": "2026-09-17",
+    "limit": null,
+    "enforce_eager": true,
+    "max_num_batched_tokens": 8192,
+    "protocol_version": 1,
+    "dataset": "gpqa_diamond",
+    "tools": false,
+    "scheduling": "continuous-final-only",
+    "split_sha256": "853ce946fbd9cd4309ce514ed69cbc571437df3d6bf30430f61d847a1350ff07",
+    "data_sha256": "9312a13f2c88c80082892fa4c60d761b5e6a04b943d36976f8904ac72e93f542",
+    "prompt_tokens_sha256": "e8746633dcb9562c4e4866144246d4b7869fa1b4cecfb39a29846c28d0f6a8ba",
+    "question_count": 198,
+    "max_prompt_tokens": 2889,
+    "model_config_sha256": "560a2e5aee4fb84cfa72b169c635bf2c15c4903e6f1dcc46d665043c43ed37a7",
+    "versions": {
+      "torch": "2.13.0+cu130",
+      "transformers": "5.17.0",
+      "vllm": "0.29.0",
+      "tokenizers": "0.23.1"
+    },
+    "mcq_profile": "qwen35-mcq",
+    "parser": "final-only-mcq-answer-v4",
+    "evaluation_source_sha256": "132fc4f5fbca751e34be02a0d127a6eb0f6674b253cd2c50d549ba58657f2afc",
+    "sampling_repeats": 8,
+    "expected_completions": 1584,
+    "repeat_option_order": "same frozen options in every repeat; independent per-question/repeat seed",
+    "generation_budget": "min(max_tokens, max_model_len - prompt_tokens); no input truncation",
+    "minimum_effective_max_tokens": 128183,
+    "maximum_effective_max_tokens": 130926,
+    "aggregation": "mean pass@1 over all completions; no majority vote or best-of-N; hierarchy macro scores also reported",
+    "protocol_source": "https://huggingface.co/Qwen/Qwen3.5-122B-A10B#best-practices",
+    "protocol_scope": "Published MCQ format; sampling parameters explicitly recorded. Exact reported benchmark protocol is not fully disclosed.",
+    "grading_source_sha256": "afb168eebfbfedc5717a3df80f817906c212f8ae2ddf61c8f05e1a0537f0bc18"
+  }
+}
