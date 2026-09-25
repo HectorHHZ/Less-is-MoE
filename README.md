@@ -8,7 +8,7 @@
 
 > **Less is MoE: Trimming Experts in Domain-Specialist Language Models**
 > Haoze He\*, Xinkai Zou\*, Xuan Jiang, Xingyuan Ding, Ao Qu, Juncheng Billy Li, Heather Miller
-> **EMNLP 2026, Main Conference (Oral)** · [arXiv:2606.05538](https://arxiv.org/abs/2606.05538)
+> **EMNLP 2026, Main Conference** · [arXiv:2606.05538](https://arxiv.org/abs/2606.05538)
 > \*Equal contribution
 
 ## Abstract
