@@ -364,7 +364,7 @@ were consolidated. Please review
 
 ## Citation
 
-Accepted at **EMNLP 2026, Main Conference (Oral)**. Would appreciate your citation :). *Preserving Long-Tailed Expert Information in
+Accepted at **EMNLP 2026, Main Conference**. Would appreciate your citation :). *Preserving Long-Tailed Expert Information in
 Mixture-of-Experts Tuning* (COLM 2026) is the analysis that Less is MoE is built
 on. It systematically pruned experts and found that although a small number of
 super experts dominate activation, discarding the rarely activated **long-tailed
